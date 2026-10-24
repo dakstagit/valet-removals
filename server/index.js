@@ -16,13 +16,46 @@ const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.D
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
 // One Make scenario can route event_type to Barry or the customer.
 // Notification failures are logged, never allowed to undo a committed acceptance or booking.
+const ensureOutbox=()=>pool.query(`CREATE TABLE IF NOT EXISTS delivery_outbox (
+ id BIGSERIAL PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, channel TEXT NOT NULL,
+ payload JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+ attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ locked_until TIMESTAMPTZ, delivered_at TIMESTAMPTZ, last_error TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+async function enqueueDelivery(client,key,channel,payload){
+ await client.query("INSERT INTO delivery_outbox(event_key,channel,payload) VALUES($1,$2,$3) ON CONFLICT(event_key) DO NOTHING",[key,channel,JSON.stringify({...payload,event_id:key})]);
+}
+let delivering=false;
+async function processDeliveries(){
+ if(delivering)return;delivering=true;
+ try{
+  await ensureOutbox();
+  for(let n=0;n<10;n++){
+   const {rows}=await pool.query(`UPDATE delivery_outbox SET status='processing',locked_until=now()+interval '90 seconds',attempts=attempts+1
+    WHERE id=(SELECT id FROM delivery_outbox WHERE (status='pending' AND next_attempt_at<=now()) OR (status='processing' AND locked_until<now())
+    ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING *`);
+   const item=rows[0];if(!item)break;
+   const endpoint=item.channel==='quote'?process.env.QUOTE_MAKE_WEBHOOK_URL:process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL;
+   const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+   try{
+    if(!endpoint)throw Error('Make webhook URL not configured');
+    const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':item.event_key},body:JSON.stringify(item.payload),signal:controller.signal});
+    if(!response.ok)throw Error('Make returned '+response.status);
+    await pool.query("UPDATE delivery_outbox SET status='delivered',delivered_at=now(),locked_until=NULL,last_error=NULL WHERE id=$1",[item.id]);
+   }catch(error){
+    const delay=Math.min(3600,30*Math.pow(2,Math.min(item.attempts-1,7)));
+    await pool.query("UPDATE delivery_outbox SET status='pending',locked_until=NULL,last_error=$2,next_attempt_at=now()+($3::integer * interval '1 second') WHERE id=$1",[item.id,String(error.message).slice(0,500),delay]);
+    console.error('Delivery queued for retry',item.event_key,error.message);
+   }finally{clearTimeout(timer)}
+  }
+ }catch(error){console.error('Outbox worker error',error)}
+ finally{delivering=false}
+}
 async function notifyMake(payload){
- const endpoint=process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL;
- if(!endpoint){console.warn('NOTIFICATIONS_MAKE_WEBHOOK_URL not configured; notification not delivered',payload.event_type,payload.reference);return}
- const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),12000);
- try{const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});if(!response.ok)throw Error('Make returned '+response.status)}
- catch(error){console.error('Notification delivery failed',payload.event_type,payload.reference,error.message)}
- finally{clearTimeout(timer)}
+ await ensureOutbox();
+ const key=payload.event_id||[payload.event_type,payload.reference,payload.quote_id].join(':');
+ await enqueueDelivery(pool,key,'notification',payload);
+ void processDeliveries();
 }
 async function enquiryNoticeData(enquiryId,quoteId){
  const {rows}=await pool.query('SELECT e.reference,e.job,q.revision,q.quote FROM enquiries e JOIN quotes q ON q.enquiry_id=e.id WHERE e.id=$1 AND q.id=$2',[enquiryId,quoteId]);
@@ -170,10 +203,28 @@ app.get('/api/test/enquiries',testApi,testAuth,wrap(async(req,res)=>{
 }));
 const customerQuote=wrap(async(req,res,next)=>{const t=String(req.params.token||'');if(!/^[A-Za-z0-9_-]{40,100}$/.test(t))return res.status(404).json({error:'Quote not found'});const {rows}=await pool.query("SELECT q.id,q.enquiry_id,q.revision,q.quote,q.state,q.viewed_at,e.reference,e.job,e.status FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE (q.customer_token_hash=$1 OR COALESCE(q.quote->'whatsappTokenHashes','[]'::jsonb) ? $1) AND q.state IN ('sent','accepted')",[sha(t)]);if(!rows[0])return res.status(404).json({error:'Quote not found'});req.customerQuote=rows[0];next()});
 app.get('/api/quotes/:token',customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(!q.viewed_at)await pool.query("UPDATE quotes SET viewed_at=now() WHERE id=$1 AND viewed_at IS NULL",[q.id]);const m=await pool.query("SELECT sender,kind,body,created_at FROM messages WHERE quote_id=$1 ORDER BY created_at",[q.id]);res.json({reference:q.reference,job:{name:q.job.name,from:q.job.from,to:q.job.to,date:q.job.date},revision:q.revision,quote:((({whatsappTokenHashes,...safe})=>safe)(q.quote)),state:q.state,status:q.status,messages:m.rows})}));
-app.post('/api/quotes/:token/accept',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(q.state==='accepted')return res.json({ok:true,status:'accepted'});if(q.status!=='quote_sent')return res.status(409).json({error:'This quotation is being revised or is no longer available for acceptance'});if(q.quote.validUntil&&Date.parse(q.quote.validUntil+'T23:59:59Z')<Date.now())return res.status(409).json({error:'This quote has expired'});const c=await pool.connect();try{await c.query('BEGIN');const updated=await c.query("UPDATE quotes SET state='accepted',accepted_at=now() WHERE id=$1 AND state='sent' RETURNING id",[q.id]);if(!updated.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Quote no longer available'})}await c.query("UPDATE enquiries SET status='accepted',updated_at=now() WHERE id=$1",[q.enquiry_id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','acceptance','Customer accepted quotation')",[q.enquiry_id,q.id]);await c.query('COMMIT');res.json({ok:true,status:'accepted'});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'quote_accepted',...details,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Acceptance notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
-app.post('/api/quotes/:token/change',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote,body=String(req.body?.message||'').trim();if(body.length<5||body.length>2000)return res.status(400).json({error:'Enter a change request (5–2000 characters)'});if(q.state!=='sent')return res.status(409).json({error:'Quote is not awaiting review'});await pool.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','change_request',$3)",[q.enquiry_id,q.id,body]);await pool.query("UPDATE enquiries SET status='change_requested',updated_at=now() WHERE id=$1",[q.enquiry_id]);res.json({ok:true});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'change_requested',...details,change_message:body,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Change notification preparation failed',error)}}));
-app.post('/api/admin/quotes/:id/send',auth,wrap(async(req,res)=>{if(!validId(req.params.id))return res.status(400).json({error:'Invalid quote ID'});if(!process.env.QUOTE_MAKE_WEBHOOK_URL)return res.status(503).json({error:'Configure QUOTE_MAKE_WEBHOOK_URL in Render first'});const q=await pool.query("SELECT q.*,e.reference,e.job FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1",[req.params.id]);const row=q.rows[0];if(!row)return res.status(404).json({error:'Quote not found'});if(row.state!=='draft')return res.status(409).json({error:'Only private drafts can be sent'});const t=token(),url=quoteUrl(t);const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url};const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);let response;try{response=await fetch(process.env.QUOTE_MAKE_WEBHOOK_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:controller.signal})}finally{clearTimeout(timer)}if(!response.ok)throw Error('Make webhook returned '+response.status);const c=await pool.connect();try{await c.query('BEGIN');const changed=await c.query("UPDATE quotes SET state='sent',sent_at=now(),customer_token_hash=$1 WHERE id=$2 AND state='draft' RETURNING id",[sha(t),row.id]);if(!changed.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Quote already sent; check Make history before retrying'})}await c.query("UPDATE quotes SET state='superseded' WHERE enquiry_id=$1 AND id<>$2 AND state='sent'",[row.enquiry_id,row.id]);await c.query("UPDATE enquiries SET status='quote_sent',updated_at=now() WHERE id=$1",[row.enquiry_id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','quote_sent','Approved quotation sent by email')",[row.enquiry_id,row.id]);await c.query('COMMIT');res.json({ok:true,quote_url:url})}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
-app.post('/api/admin/enquiries/:id/confirm-booking',auth,wrap(async(req,res)=>{if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});const collectionDate=String(req.body?.collectionDate||''),arrivalWindow=String(req.body?.arrivalWindow||'').trim();if(!/^\d{4}-\d{2}-\d{2}$/.test(collectionDate)||!arrivalWindow||arrivalWindow.length>120)return res.status(400).json({error:'Collection date and arrival window required'});const c=await pool.connect();try{await c.query('BEGIN');const {rows}=await c.query("SELECT id FROM quotes WHERE enquiry_id=$1 AND state='accepted' ORDER BY revision DESC LIMIT 1",[req.params.id]);if(!rows[0]){await c.query('ROLLBACK');return res.status(409).json({error:'Customer must accept the quote before booking'})}await c.query("INSERT INTO bookings(enquiry_id,quote_id,collection_date,arrival_window) VALUES($1,$2,$3,$4) ON CONFLICT(enquiry_id) DO NOTHING",[req.params.id,rows[0].id,collectionDate,arrivalWindow]);await c.query("UPDATE enquiries SET status='booked',updated_at=now() WHERE id=$1",[req.params.id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','booking_confirmed',$3)",[req.params.id,rows[0].id,'Collection '+collectionDate+' · '+arrivalWindow]);await c.query('COMMIT');res.json({ok:true});try{const details=await enquiryNoticeData(Number(req.params.id),rows[0].id);await notifyMake({event_type:'booking_confirmed',...details,collection_date:collectionDate,arrival_window:arrivalWindow})}catch(error){console.error('Booking notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
+app.post('/api/quotes/:token/accept',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(q.state==='accepted')return res.json({ok:true,status:'accepted'});if(q.status!=='quote_sent')return res.status(409).json({error:'This quotation is being revised or is no longer available for acceptance'});if(q.quote.validUntil&&Date.parse(q.quote.validUntil+'T23:59:59Z')<Date.now())return res.status(409).json({error:'This quote has expired'});const c=await pool.connect();try{await c.query('BEGIN');const updated=await c.query("UPDATE quotes SET state='accepted',accepted_at=now() WHERE id=$1 AND state='sent' RETURNING id",[q.id]);if(!updated.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Quote no longer available'})}await c.query("UPDATE enquiries SET status='accepted',updated_at=now() WHERE id=$1",[q.enquiry_id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','acceptance','Customer accepted quotation')",[q.enquiry_id,q.id]);await c.query('COMMIT');res.json({ok:true,status:'accepted'});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'quote_accepted',event_id:'accepted:'+q.id,...details,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Acceptance notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
+app.post('/api/quotes/:token/change',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote,body=String(req.body?.message||'').trim();if(body.length<5||body.length>2000)return res.status(400).json({error:'Enter a change request (5–2000 characters)'});if(q.state!=='sent'||q.status!=='quote_sent')return res.status(409).json({error:'Quote is not awaiting review'});await pool.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','change_request',$3)",[q.enquiry_id,q.id,body]);await pool.query("UPDATE enquiries SET status='change_requested',updated_at=now() WHERE id=$1",[q.enquiry_id]);res.json({ok:true});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'change_requested',event_id:'change:'+q.id+':'+sha(body),...details,change_message:body,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Change notification preparation failed',error)}}));
+app.post('/api/admin/quotes/:id/send',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid quote ID'});
+ if(!process.env.QUOTE_MAKE_WEBHOOK_URL)return res.status(503).json({error:'Configure QUOTE_MAKE_WEBHOOK_URL in Render first'});
+ await ensureOutbox();
+ const c=await pool.connect();try{
+  await c.query('BEGIN');
+  const {rows}=await c.query("SELECT q.*,e.reference,e.job FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 FOR UPDATE OF q",[req.params.id]);
+  const row=rows[0];if(!row){await c.query('ROLLBACK');return res.status(404).json({error:'Quote not found'})}
+  if(row.state!=='draft'){await c.query('ROLLBACK');return res.status(409).json({error:'Quotation already submitted for delivery'})}
+  const t=token(),url=quoteUrl(t);
+  const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url};
+  await c.query("UPDATE quotes SET state='sent',sent_at=now(),customer_token_hash=$1 WHERE id=$2",[sha(t),row.id]);
+  await c.query("UPDATE quotes SET state='superseded' WHERE enquiry_id=$1 AND id<>$2 AND state='sent'",[row.enquiry_id,row.id]);
+  await c.query("UPDATE enquiries SET status='quote_sent',updated_at=now() WHERE id=$1",[row.enquiry_id]);
+  await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','quote_sent','Approved quotation queued for email')",[row.enquiry_id,row.id]);
+  await enqueueDelivery(c,'quote:'+row.id,'quote',payload);
+  await c.query('COMMIT');res.json({ok:true,delivery:'queued',quote_url:url});void processDeliveries();
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
+app.post('/api/admin/enquiries/:id/confirm-booking',auth,wrap(async(req,res)=>{if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});const collectionDate=String(req.body?.collectionDate||''),arrivalWindow=String(req.body?.arrivalWindow||'').trim();if(!/^\d{4}-\d{2}-\d{2}$/.test(collectionDate)||!arrivalWindow||arrivalWindow.length>120)return res.status(400).json({error:'Collection date and arrival window required'});const c=await pool.connect();try{await c.query('BEGIN');const {rows}=await c.query("SELECT id FROM quotes WHERE enquiry_id=$1 AND state='accepted' ORDER BY revision DESC LIMIT 1",[req.params.id]);if(!rows[0]){await c.query('ROLLBACK');return res.status(409).json({error:'Customer must accept the quote before booking'})}const inserted=await c.query("INSERT INTO bookings(enquiry_id,quote_id,collection_date,arrival_window) VALUES($1,$2,$3,$4) ON CONFLICT(enquiry_id) DO NOTHING RETURNING enquiry_id",[req.params.id,rows[0].id,collectionDate,arrivalWindow]);if(!inserted.rowCount){await c.query('ROLLBACK');return res.json({ok:true,already_booked:true})}await c.query("UPDATE enquiries SET status='booked',updated_at=now() WHERE id=$1",[req.params.id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','booking_confirmed',$3)",[req.params.id,rows[0].id,'Collection '+collectionDate+' · '+arrivalWindow]);await c.query('COMMIT');res.json({ok:true});try{const details=await enquiryNoticeData(Number(req.params.id),rows[0].id);await notifyMake({event_type:'booking_confirmed',event_id:'booking:'+req.params.id,...details,collection_date:collectionDate,arrival_window:arrivalWindow})}catch(error){console.error('Booking notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
 app.get('/quote/:token',(req,res)=>res.sendFile(path.join(projectRoot,'customer/quote.html')));
 app.get('/customer/quote.js',(req,res)=>res.sendFile(path.join(projectRoot,'customer/quote.js')));
 
@@ -187,5 +238,6 @@ app.get('/admin/owner.js',(req,res)=>res.sendFile(path.join(projectRoot,'admin/o
 app.get(['/admin','/admin/'],wrap(async(req,res)=>res.type('html').send(await readFile(adminPage,'utf8'))));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server error'});});
 const port=Number(process.env.PORT||3000);
+if(process.env.DATABASE_URL){setInterval(()=>{void processDeliveries()},30000).unref();void processDeliveries()}
 if(process.env.DATABASE_URL)app.listen(port,()=>console.log(`Valet API listening on ${port}`));
 else {console.error('DATABASE_URL is required');process.exitCode=1;}

@@ -13,7 +13,7 @@ const item=(k,v)=>'<div class="summary-field"><span class="summary-label">'+esc(
 const summary=q=>{const v=q?.quote||{};return '<div class="summary-grid">'+item('Total',money(v.total))+item('Agreed services',v.scope)+item('Valid until',v.validUntil)+item('Revision',q?.revision)+'</div>'};
 function render(){
 const r=current,j=r.job||{},st=r.status,q=r.quotes?.[0],accepted=r.quotes?.find(x=>x.state==='accepted')||q;
-let h='<div class="detail-top"><div><span class="eyebrow dark">'+esc(r.reference)+'</span><h2>'+esc(j.name)+'</h2><p>'+esc(j.email)+' · '+esc(j.phone)+'</p></div><span class="badge">'+esc(label(st))+'</span></div><div class="detail-body"><div class="route-summary"><div><span>Collection</span><strong>'+esc(j.from)+'</strong></div><b>→</b><div><span>Delivery</span><strong>'+esc(j.to)+'</strong></div></div>';
+let h='<div class="detail-top owner-status-'+esc(st)+'"><div><span class="eyebrow dark">'+esc(r.reference)+'</span><h2>'+esc(j.name)+'</h2><p>'+esc(j.email)+' · '+esc(j.phone)+'</p></div><div class="owner-status-heading"><span class="owner-status-caption">CURRENT STATUS</span><strong>'+esc(label(st))+'</strong></div></div><div class="detail-body"><div class="route-summary"><div><span>Collection</span><strong>'+esc(j.from)+'</strong></div><b>→</b><div><span>Delivery</span><strong>'+esc(j.to)+'</strong></div></div>';
 if(st==='booked'){const b=r.booking||{};h+='<section class="section booked-panel"><div class="booked-heading"><div><span class="booked-kicker">BOOKING CONFIRMED</span><h3>Booking summary</h3><p>Reference '+esc(r.reference)+'</p></div><div class="booked-total"><span>Agreed total</span><strong>'+money(accepted?.quote?.total)+'</strong></div></div><div class="summary-grid">'+item('Customer',j.name)+item('Email',j.email)+item('Phone',j.phone)+item('Collection date',String(b.collection_date||'').slice(0,10))+item('Arrival window',b.arrival_window)+item('Collection',j.from)+item('Delivery',j.to)+item('Agreed services',accepted?.quote?.scope)+ '</div></section>'}
 else if(st==='accepted'){h+='<section class="section"><h3>Customer accepted — confirm booking</h3>'+summary(accepted)+'<label class="field">Collection date<input type="date" id="bookingDate" value="'+esc(j.date||'')+'"></label><label class="field">Arrival window<input id="bookingWindow" placeholder="09:00–11:00"></label><button class="button teal" id="confirmBooking">Confirm booking</button></section>'}
 else if(st==='quote_sent'){h+='<section class="section"><h3>Quotation sent</h3><p>Awaiting the customer’s response.</p>'+summary(q)+'<p>'+(q?.viewed_at?'Customer has viewed the quotation.':'Customer has not yet viewed the quotation.')+'</p><button class="button teal" id="sendWhatsapp">Send via WhatsApp</button></section>'}
@@ -85,3 +85,22 @@ async function loadOwnerPhotos(enquiryId){
  }catch(e){if(target.isConnected)target.textContent='Unable to load photos: '+e.message}
 }
 const ownerPhotoStyle=document.createElement('style');ownerPhotoStyle.textContent='#ownerView .owner-photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:12px}#ownerView .owner-photo-grid img{width:100%;height:130px;object-fit:cover;border-radius:9px;border:1px solid #dce5ec}';document.head.appendChild(ownerPhotoStyle);
+
+const ownerStatusStyle=document.createElement('style');ownerStatusStyle.textContent=`
+#ownerView .detail-top[class*="owner-status-"]{border-radius:12px 12px 0 0;padding:24px 26px!important;display:flex;align-items:center;justify-content:space-between;gap:20px;background:#f0f5fa;border-bottom:3px solid #7794ad}
+#ownerView .detail-top.owner-status-needs_review{background:#fff4e6;border-bottom-color:#e59a36}
+#ownerView .detail-top.owner-status-draft_ready{background:#eaf2ff;border-bottom-color:#527fca}
+#ownerView .detail-top.owner-status-quote_sent{background:#e9f5ff;border-bottom-color:#2288d1}
+#ownerView .detail-top.owner-status-change_requested{background:#fff0eb;border-bottom-color:#d66d43}
+#ownerView .detail-top.owner-status-accepted{background:#e9f8ee;border-bottom-color:#23945d}
+#ownerView .detail-top.owner-status-booked{background:#e5f7f4;border-bottom-color:#008c83}
+#ownerView .owner-status-heading{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0}
+#ownerView .owner-status-caption{font-size:11px;font-weight:800;letter-spacing:.12em;color:#596d80}
+#ownerView .owner-status-heading strong{font-size:clamp(21px,2.2vw,30px)!important;font-weight:850!important;line-height:1.15!important;color:#18364c}
+#ownerView .owner-status-quote_sent .owner-status-heading strong{color:#1266a6}
+#ownerView .owner-status-accepted .owner-status-heading strong{color:#167344}
+#ownerView .owner-status-booked .owner-status-heading strong{color:#007b73}
+#ownerView .owner-status-change_requested .owner-status-heading strong{color:#a94b29}
+#ownerView .owner-status-needs_review .owner-status-heading strong{color:#a66a12}
+@media(max-width:680px){#ownerView .detail-top[class*="owner-status-"]{align-items:flex-start;flex-direction:column}#ownerView .owner-status-heading{text-align:left;align-items:flex-start}}
+`;document.head.appendChild(ownerStatusStyle);

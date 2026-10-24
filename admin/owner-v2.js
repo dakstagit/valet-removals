@@ -8,12 +8,12 @@ function toast(t){const e=$('#toast');e.textContent=t;e.hidden=false;setTimeout(
 async function load(){[records,settings]=await Promise.all([api('/api/admin/enquiries'),api('/api/admin/settings')]);queue();if(selected)await select(selected)}
 function queue(){$('#queueLabel').textContent=records.length+' enquiries';$('#queueList').innerHTML=records.map(r=>'<button class="queue-item '+(selected===r.id?'selected':'')+'" data-id="'+r.id+'"><strong>'+esc(r.job?.name)+'</strong><small>'+esc(r.reference)+' · '+esc(r.job?.from)+' → '+esc(r.job?.to)+'</small><span class="badge">'+esc(label(r.status))+'</span></button>').join('')||'<p>No enquiries yet</p>';document.querySelectorAll('[data-id]').forEach(b=>b.onclick=()=>select(Number(b.dataset.id)))}
 async function select(id){selected=id;current=await api('/api/admin/enquiries/'+id);const r=records.find(x=>x.id===id);if(r)r.status=current.status;queue();render()}
-const item=(k,v)=>'<div class="summary-field"><small>'+esc(k)+'</small><strong>'+esc(v||'—')+'</strong></div>';
+const item=(k,v)=>'<div class="summary-field"><span class="summary-label">'+esc(k)+'</span><div class="summary-value">'+esc(v??'—')+'</div></div>';
 const summary=q=>{const v=q?.quote||{};return '<div class="summary-grid">'+item('Total',money(v.total))+item('Agreed services',v.scope)+item('Valid until',v.validUntil)+item('Revision',q?.revision)+'</div>'};
 function render(){
 const r=current,j=r.job||{},st=r.status,q=r.quotes?.[0],accepted=r.quotes?.find(x=>x.state==='accepted')||q;
 let h='<div class="detail-top"><div><span class="eyebrow dark">'+esc(r.reference)+'</span><h2>'+esc(j.name)+'</h2><p>'+esc(j.email)+' · '+esc(j.phone)+'</p></div><span class="badge">'+esc(label(st))+'</span></div><div class="detail-body"><div class="route-summary"><div><span>Collection</span><strong>'+esc(j.from)+'</strong></div><b>→</b><div><span>Delivery</span><strong>'+esc(j.to)+'</strong></div></div>';
-if(st==='booked'){const b=r.booking||{};h+='<section class="section"><h3>Confirmed booking</h3><div class="summary-grid">'+item('Booking reference',r.reference)+item('Customer',j.name)+item('Email',j.email)+item('Phone',j.phone)+item('Collection date',String(b.collection_date||'').slice(0,10))+item('Arrival window',b.arrival_window)+item('Collection',j.from)+item('Delivery',j.to)+item('Agreed services',accepted?.quote?.scope)+item('Final price',money(accepted?.quote?.total))+'</div></section>'}
+if(st==='booked'){const b=r.booking||{};h+='<section class="section booked-panel"><div class="booked-heading"><div><span class="booked-kicker">BOOKING CONFIRMED</span><h3>Booking summary</h3><p>Reference '+esc(r.reference)+'</p></div><div class="booked-total"><span>Agreed total</span><strong>'+money(accepted?.quote?.total)+'</strong></div></div><div class="summary-grid">'+item('Booking reference',r.reference)+item('Customer',j.name)+item('Email',j.email)+item('Phone',j.phone)+item('Collection date',String(b.collection_date||'').slice(0,10))+item('Arrival window',b.arrival_window)+item('Collection',j.from)+item('Delivery',j.to)+item('Agreed services',accepted?.quote?.scope)+ '</div></section>'}
 else if(st==='accepted'){h+='<section class="section"><h3>Customer accepted — confirm booking</h3>'+summary(accepted)+'<label class="field">Collection date<input type="date" id="bookingDate" value="'+esc(j.date||'')+'"></label><label class="field">Arrival window<input id="bookingWindow" placeholder="09:00–11:00"></label><button class="button teal" id="confirmBooking">Confirm booking</button></section>'}
 else if(st==='quote_sent'){h+='<section class="section"><h3>Quotation sent</h3><p>Awaiting the customer’s response.</p>'+summary(q)+'<p>'+(q?.viewed_at?'Customer has viewed the quotation.':'Customer has not yet viewed the quotation.')+'</p></section>'}
 else if(st==='draft_ready'){h+='<section class="section"><h3>Review private draft</h3>'+summary(q)+(q?.state==='draft'?'<button class="button teal" id="sendQuote">Approve &amp; send email</button>':'')+'</section>'}
@@ -32,5 +32,32 @@ async function send(id){if(!confirm('Approve and send this quotation?'))return;t
 async function book(){try{await api('/api/admin/enquiries/'+selected+'/confirm-booking',{method:'POST',body:JSON.stringify({collectionDate:$('#bookingDate').value,arrivalWindow:$('#bookingWindow').value.trim()})});await load();toast('Booking confirmed')}catch(e){toast(e.message)}}
 $('#loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;await load()}catch(x){$('#loginError').textContent=x.message}};
 $('#logout').onclick=async()=>{await api('/api/admin/logout',{method:'POST'});$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true};
-$('#settingsBtn').onclick=()=>{const p=$('#settingsPanel');p.hidden=!p.hidden;if(!p.hidden){p.innerHTML='<h2>Rate settings</h2><div class="settings-grid">'+Object.entries(settings).map(([k,v])=>'<label class="field">'+esc(k)+'<input data-rate="'+esc(k)+'" type="number" min="0" step="any" value="'+esc(v)+'"></label>').join('')+'</div><button class="button teal" id="saveRates">Save rates</button>';$('#saveRates').onclick=async()=>{const v={};document.querySelectorAll('[data-rate]').forEach(i=>v[i.dataset.rate]=Number(i.value));try{settings=await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(v)});toast('Rates saved')}catch(e){toast(e.message)}}}};
+
+const rateMeta={
+one:['Labour & minimums','One-person hourly rate','€ / hour','Applied to eligible one-person jobs'],
+two:['Labour & minimums','Two-person crew hourly rate','€ / hour','Applied when two movers are required'],
+minHours:['Labour & minimums','Minimum billable time','hours','Minimum charged even for shorter jobs'],
+vat:['Labour & minimums','VAT rate','%','Added to the quotation subtotal'],
+small:['Handling time','Small load allowance','minutes / location','Base handling time at each end'],
+medium:['Handling time','Medium load allowance','minutes / location','Base handling time at each end'],
+large:['Handling time','Large load allowance','minutes / location','Base handling time at each end'],
+stairs:['Access & extra stops','Stairs allowance','minutes / floor','Adjusted for load size'],
+lift:['Access & extra stops','Lift allowance','minutes','Adjusted for load size'],
+carryMid:['Access & extra stops','Carry distance: 10–30 metres','minutes','Added where items must be carried further'],
+carryLong:['Access & extra stops','Carry distance: 30–50 metres','minutes','Added for longer carrying distances'],
+steps:['Access & extra stops','External steps allowance','minutes','Added for external steps, adjusted for load'],
+extraStop:['Access & extra stops','Extra stop handling allowance','minutes / stop','Added per additional stop, adjusted for load'],
+urgent:['Surcharges & waiting','Urgent / out-of-hours surcharge','% of labour','Only applied to urgent jobs'],
+waitGrace:['Surcharges & waiting','Waiting grace period','minutes','Stored setting; not currently used in quote calculation']
+};
+$('#settingsBtn').onclick=()=>{
+const p=$('#settingsPanel');p.hidden=!p.hidden;if(p.hidden)return;
+const groups=['Labour & minimums','Handling time','Access & extra stops','Surcharges & waiting'];
+p.innerHTML='<div class="rates-heading"><div><h2>Quotation pricing settings</h2><p>These values control how new quotations are calculated. Existing accepted quotations are not recalculated.</p></div><button class="button outline" id="closeRates" type="button">Close</button></div>'+
+groups.map(g=>{const entries=Object.entries(settings).filter(([k])=>(rateMeta[k]?.[0]||'Other')===g);return entries.length?'<section class="rates-group"><h3>'+esc(g)+'</h3><div class="rates-grid">'+entries.map(([k,v])=>{const m=rateMeta[k]||[g,k,'',''];return '<label class="rate-field"><span class="rate-label">'+esc(m[1])+'</span><span class="rate-input"><input data-rate="'+esc(k)+'" type="number" min="0" step="any" value="'+esc(v)+'"><em>'+esc(m[2])+'</em></span><small>'+esc(m[3])+'</small></label>'}).join('')+'</div></section>':''}).join('')+
+'<div class="rates-actions"><button class="button teal" id="saveRates" type="button">Save pricing settings</button><span id="rateFeedback" role="status"></span></div>';
+$('#closeRates').onclick=()=>{p.hidden=true};
+$('#saveRates').onclick=async()=>{const v={};document.querySelectorAll('[data-rate]').forEach(i=>v[i.dataset.rate]=Number(i.value));const btn=$('#saveRates');btn.disabled=true;try{settings=await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(v)});$('#rateFeedback').textContent='Settings saved successfully.';toast('Rates saved')}catch(e){$('#rateFeedback').textContent=e.message;toast(e.message)}finally{btn.disabled=false}};
+};
+
 api('/api/admin/me').then(async()=>{$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;await load()}).catch(()=>{$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true});

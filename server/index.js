@@ -197,6 +197,24 @@ app.post('/api/test/enquiries/quote-sent',testApi,testAuth,wrap(async(req,res)=>
  res.status(201).json({test:true,enquiry_id:en.id,reference:en.reference,quote_id:q.id,status:'quote_sent',quote_url:quoteUrl(t),admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'});
  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
 }));
+app.get('/api/test/deliveries',testApi,testAuth,wrap(async(req,res)=>{
+ await ensureOutbox();
+ const {rows}=await pool.query("SELECT id,event_key,channel,status,attempts,next_attempt_at,delivered_at,last_error,created_at FROM delivery_outbox ORDER BY id DESC LIMIT 50");
+ res.json(rows);
+}));
+app.post('/api/test/enquiries/draft',testApi,testAuth,wrap(async(req,res)=>{
+ const input=req.body||{},email=String(input.email||'test@example.com').trim();
+ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254)return res.status(400).json({error:'Invalid email'});
+ const job={name:String(input.name||'Test Draft Customer').slice(0,150),email,phone:'0871234567',from:'Dublin 2',to:'Dublin 4',acknowledge:true};
+ const quote={total:369,scope:'Test furniture removal',validUntil:new Date(Date.now()+14*86400000).toISOString().slice(0,10),revision:1,test:true};
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const {rows:[en]}=await c.query("INSERT INTO enquiries(job,source,status) VALUES($1,'api_test','draft_ready') RETURNING id,reference",[JSON.stringify(job)]);
+ const {rows:[q]}=await c.query("INSERT INTO quotes(enquiry_id,revision,quote,state) VALUES($1,1,$2,'draft') RETURNING id",[en.id,JSON.stringify(quote)]);
+ await c.query('COMMIT');
+ res.status(201).json({test:true,enquiry_id:en.id,reference:en.reference,quote_id:q.id,status:'draft_ready',admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'});
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
 app.get('/api/test/enquiries',testApi,testAuth,wrap(async(req,res)=>{
  const {rows}=await pool.query("SELECT e.id,e.reference,e.status,e.job->>'name' AS name,e.created_at,q.id AS quote_id,q.state AS quote_state FROM enquiries e LEFT JOIN LATERAL (SELECT id,state FROM quotes WHERE enquiry_id=e.id ORDER BY revision DESC LIMIT 1) q ON true WHERE e.source='api_test' ORDER BY e.created_at DESC LIMIT 50");
  res.json(rows);

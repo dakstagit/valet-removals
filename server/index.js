@@ -94,11 +94,11 @@ app.post('/api/admin/quotes/:id/whatsapp-link',auth,wrap(async(req,res)=>{
  const {rows}=await c.query("SELECT q.id,q.enquiry_id,q.quote,q.state,e.reference,e.job,e.status FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 FOR UPDATE OF q",[req.params.id]);
  const q=rows[0];
  if(!q||q.state!=='sent'||q.status!=='quote_sent'){await c.query('ROLLBACK');return res.status(409).json({error:'Only the current sent quotation can be shared via WhatsApp'})}
- const phone=String(q.job.phone||'').replace(/[^0-9+]/g,'');
- let digits=phone.replace(/\\D/g,'');
+ const phone=String(q.job.phone||'');
+ let digits=Array.from(phone).filter(ch=>ch>='0'&&ch<='9').join('');
  if(digits.startsWith('00'))digits=digits.slice(2);
  else if(digits.startsWith('0'))digits='353'+digits.slice(1);
- if(!/^\\d{8,15}$/.test(digits)){await c.query('ROLLBACK');return res.status(422).json({error:'Customer phone number is missing or invalid for WhatsApp'})}
+ if(digits.length<8||digits.length>15){await c.query('ROLLBACK');return res.status(422).json({error:'Customer phone number is missing or invalid for WhatsApp'})}
  const t=token();
  await c.query("UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',to_jsonb(ARRAY(SELECT jsonb_array_elements_text(COALESCE(quote->'whatsappTokenHashes','[]'::jsonb))) || $1::text),true) WHERE id=$2",[sha(t),q.id]);
  await c.query('COMMIT');

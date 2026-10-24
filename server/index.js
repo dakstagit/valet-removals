@@ -107,6 +107,37 @@ app.post('/api/admin/quotes/:id/whatsapp-link',auth,wrap(async(req,res)=>{
  res.json({whatsapp_url:'https://wa.me/'+digits+'?text='+encodeURIComponent(msg)});
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }));
+
+const testApi=rateLimit({windowMs:15*60*1000,limit:30,standardHeaders:'draft-7',legacyHeaders:false});
+const testAuth=(req,res,next)=>{
+ if(process.env.ENABLE_TEST_API!=='true'||process.env.NODE_ENV==='production'&&process.env.ALLOW_TEST_API_IN_PRODUCTION!=='true')return res.status(404).json({error:'Test API disabled'});
+ const expected=process.env.TEST_API_KEY||'',supplied=String(req.get('x-test-api-key')||'');
+ if(expected.length<32||supplied.length!==expected.length||!crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))return res.status(401).json({error:'Invalid test API key'});
+ next();
+};
+app.post('/api/test/enquiries/quote-sent',testApi,testAuth,wrap(async(req,res)=>{
+ const input=req.body||{};
+ const name=String(input.name||'Test Customer').trim(),email=String(input.email||'test@example.com').trim(),phone=String(input.phone||'0871234567').trim();
+ const from=String(input.from||'Dublin 2').trim(),to=String(input.to||'Dublin 4').trim(),scope=String(input.scope||'Test removal of household furniture').trim();
+ const total=Number(input.total??369);
+ if(name.length<2||name.length>150||!email.includes('@')||email.length>254||phone.length>40||from.length<3||from.length>300||to.length<3||to.length>300||scope.length<3||scope.length>3000||!Number.isFinite(total)||total<=0||total>100000)return res.status(400).json({error:'Invalid test enquiry fields'});
+ const job={name,email,phone,from,to,description:scope,acknowledge:true};
+ const expiry=new Date(Date.now()+14*86400000).toISOString().slice(0,10);
+ const quote={total,scope,validUntil:expiry,revision:1,manualRevision:true,preparedAt:new Date().toISOString(),test:true};
+ const t=token(),c=await pool.connect();
+ try{
+ await c.query('BEGIN');
+ const {rows:[en]}=await c.query("INSERT INTO enquiries(job,source,status) VALUES($1,'api_test','quote_sent') RETURNING id,reference",[JSON.stringify(job)]);
+ const {rows:[q]}=await c.query("INSERT INTO quotes(enquiry_id,revision,quote,state,customer_token_hash,sent_at) VALUES($1,1,$2,'sent',$3,now()) RETURNING id",[en.id,JSON.stringify(quote),sha(t)]);
+ await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'system','test_seed','Test quotation created without sending email')",[en.id,q.id]);
+ await c.query('COMMIT');
+ res.status(201).json({test:true,enquiry_id:en.id,reference:en.reference,quote_id:q.id,status:'quote_sent',quote_url:quoteUrl(t),admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'});
+ }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
+}));
+app.get('/api/test/enquiries',testApi,testAuth,wrap(async(req,res)=>{
+ const {rows}=await pool.query("SELECT e.id,e.reference,e.status,e.job->>'name' AS name,e.created_at,q.id AS quote_id,q.state AS quote_state FROM enquiries e LEFT JOIN LATERAL (SELECT id,state FROM quotes WHERE enquiry_id=e.id ORDER BY revision DESC LIMIT 1) q ON true WHERE e.source='api_test' ORDER BY e.created_at DESC LIMIT 50");
+ res.json(rows);
+}));
 const customerQuote=wrap(async(req,res,next)=>{const t=String(req.params.token||'');if(!/^[A-Za-z0-9_-]{40,100}$/.test(t))return res.status(404).json({error:'Quote not found'});const {rows}=await pool.query("SELECT q.id,q.enquiry_id,q.revision,q.quote,q.state,q.viewed_at,e.reference,e.job,e.status FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE (q.customer_token_hash=$1 OR COALESCE(q.quote->'whatsappTokenHashes','[]'::jsonb) ? $1) AND q.state IN ('sent','accepted')",[sha(t)]);if(!rows[0])return res.status(404).json({error:'Quote not found'});req.customerQuote=rows[0];next()});
 app.get('/api/quotes/:token',customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(!q.viewed_at)await pool.query("UPDATE quotes SET viewed_at=now() WHERE id=$1 AND viewed_at IS NULL",[q.id]);const m=await pool.query("SELECT sender,kind,body,created_at FROM messages WHERE quote_id=$1 ORDER BY created_at",[q.id]);res.json({reference:q.reference,job:{name:q.job.name,from:q.job.from,to:q.job.to,date:q.job.date},revision:q.revision,quote:((({whatsappTokenHashes,...safe})=>safe)(q.quote)),state:q.state,status:q.status,messages:m.rows})}));
 app.post('/api/quotes/:token/accept',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(q.state==='accepted')return res.json({ok:true,status:'accepted'});if(q.status!=='quote_sent')return res.status(409).json({error:'This quotation is being revised or is no longer available for acceptance'});if(q.quote.validUntil&&Date.parse(q.quote.validUntil+'T23:59:59Z')<Date.now())return res.status(409).json({error:'This quote has expired'});const c=await pool.connect();try{await c.query('BEGIN');const updated=await c.query("UPDATE quotes SET state='accepted',accepted_at=now() WHERE id=$1 AND state='sent' RETURNING id",[q.id]);if(!updated.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Quote no longer available'})}await c.query("UPDATE enquiries SET status='accepted',updated_at=now() WHERE id=$1",[q.enquiry_id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','acceptance','Customer accepted quotation')",[q.enquiry_id,q.id]);await c.query('COMMIT');res.json({ok:true,status:'accepted'});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'quote_accepted',...details,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Acceptance notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));

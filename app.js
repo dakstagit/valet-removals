@@ -35,6 +35,21 @@ function validation(){if(step===0){if(job.from.trim().length<3||job.to.trim().le
 const photoData = file => new Promise((resolve,reject)=>{
  const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Could not read photo.'));reader.readAsDataURL(file);
 });
+async function compressedPhoto(file){
+ const bitmap=await createImageBitmap(file);
+ try{
+  const scale=Math.min(1,1200/Math.max(bitmap.width,bitmap.height));
+  const canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+  canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+  for(const quality of [.8,.68,.55,.42]){
+   const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/webp',quality));
+   if(blob&&blob.type==='image/webp'&&blob.size<=450000){
+    return {filename:file.name.replace(/\.[^.]+$/,'')+'.webp',mime_type:'image/webp',content_base64:await photoData(blob)};
+   }
+  }
+  throw Error('One photo could not be compressed below 450 KB. Please choose a smaller image.');
+ }finally{bitmap.close()}
+}
 function plainSummary(j){
  const accessSummary=a=>[a.service==='ready'?'Ready at entrance':a.service==='indoor'?'Indoor help':'Not sure',`floor ${a.floor}`,`lift ${a.lift}`,`outside steps ${a.steps}`,`carry ${a.carry}`,`parking ${a.parking}`,`tight access ${a.tight?'yes':'no'}`].join(', ');
  return [
@@ -53,7 +68,8 @@ async function submitJob(){
   const attachments=await Promise.all(photos.map(async p=>({filename:p.name,mime_type:p.file.type,content_base64:await photoData(p.file)})));
   const payload={source:'Valet Removals Phase 1',type:'removals_enquiry',submitted_at:new Date().toISOString(),plain_text_summary:plainSummary(job),...job,photos:attachments};
   // Save the enquiry before notifying the owner; never claim success if persistence fails.
-  const saved=await fetch('/api/enquiries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job})});
+  const compressed=await Promise.all(photos.map(p=>compressedPhoto(p.file)));
+  const saved=await fetch('/api/enquiries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job,photos:compressed})});
   if(!saved.ok)throw new Error('Unable to save your enquiry ('+saved.status+').');
   const record=await saved.json();
   payload.reference=record.reference;

@@ -65,7 +65,7 @@ app.post('/api/admin/enquiries/:id/drafts',auth,wrap(async(req,res)=>{
 
 app.post('/api/admin/enquiries/:id/revise',auth,wrap(async(req,res)=>{
  const id=Number(req.params.id),scope=String(req.body?.scope||'').trim(),validUntil=String(req.body?.validUntil||''),total=Number(req.body?.total);
- if(!Number.isSafeInteger(id)||id<1||!scope||scope.length>3000||!/^\\d{4}-\\d{2}-\\d{2}$/.test(validUntil)||!Number.isFinite(total)||total<=0||total>1000000)return res.status(400).json({error:'Provide a valid scope, expiry date and positive total price'});
+ if(!Number.isSafeInteger(id)||id<1||!scope||scope.length>3000||!/^\d{4}-\d{2}-\d{2}$/.test(validUntil)||!Number.isFinite(total)||total<=0||total>1000000)return res.status(400).json({error:'Provide a valid scope, expiry date and positive total price'});
  if(Date.parse(validUntil+'T23:59:59Z')<Date.now())return res.status(400).json({error:'Validity date cannot be in the past'});
  const c=await pool.connect();try{
  await c.query('BEGIN');

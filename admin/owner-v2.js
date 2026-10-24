@@ -25,7 +25,9 @@ else if(st==='change_requested'){
 }
 else {const requests=(r.messages||[]).filter(x=>x.kind==='change_request');if(st==='change_requested')h+='<section class="section"><h3>Requested changes</h3>'+requests.map(x=>'<p>'+esc(x.body)+'</p>').join('')+'</section>';
 h+='<section class="section"><h3>Review enquiry</h3>'+item('Items',j.description)+item('Requested date',j.date)+item('Load',j.load)+item('Notes',j.notes)+'<h3>Calculate quotation</h3><div class="settings-grid">'+[['dispatch','Dispatch minutes',20],['travel','Route minutes',30],['returnTime','Return minutes',20]].map(([id,n,v])=>'<label class="field">'+n+'<input type="number" id="'+id+'" value="'+v+'" min="0"></label>').join('')+'<label class="field">Crew<select id="crew"><option value="auto">Auto</option><option value="1">1 person</option><option value="2">2 people</option></select></label></div><div class="verification"><label><input type="checkbox" id="routeVerified"> Route verified</label><label><input type="checkbox" id="handlingVerified"> Handling verified</label><label><input type="checkbox" id="feasibility"> Feasibility checked</label></div><button class="button teal" id="calculate">Calculate quote</button><div id="calculation"></div><div id="draftForm" hidden><h3>Prepare draft</h3><label class="field">Agreed scope<textarea id="scope" rows="4"></textarea></label><label class="field">Valid until<input id="validUntil" type="date"></label><button class="button orange" id="prepare">Prepare draft</button></div></section>'}
+h+='<section class="section"><h3>Customer photos</h3><div id="ownerPhotos">Loading photos…</div></section>';
 $('#quoteDetail').innerHTML=h+'</div>';
+loadOwnerPhotos(r.id);
 if($('#sendWhatsapp'))$('#sendWhatsapp').onclick=sendWhatsapp;
 if($('#prepareRevision'))$('#prepareRevision').onclick=revise;
 if($('#calculate'))$('#calculate').onclick=calculate;
@@ -72,3 +74,14 @@ $('#saveRates').onclick=async()=>{const v={};document.querySelectorAll('[data-ra
 api('/api/admin/me').then(async()=>{$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;await load()}).catch(()=>{$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true});
 
 async function sendWhatsapp(){const b=$('#sendWhatsapp');if(!b||!current?.quotes?.[0])return;const tab=window.open('about:blank','_blank');try{b.disabled=true;const d=await api('/api/admin/quotes/'+current.quotes[0].id+'/whatsapp-link',{method:'POST'});if(tab)tab.location.href=d.whatsapp_url;else{await navigator.clipboard.writeText(d.whatsapp_url);toast('WhatsApp link copied. Open it in a new tab.')}}catch(e){if(tab)tab.close();toast(e.message)}finally{b.disabled=false}}
+
+async function loadOwnerPhotos(enquiryId){
+ const target=$('#ownerPhotos');if(!target)return;
+ try{
+  const photos=await api('/api/admin/enquiries/'+enquiryId+'/photos');
+  if(selected!==enquiryId||!target.isConnected)return;
+  if(!photos.length){target.textContent='No photos uploaded.';return}
+  target.innerHTML='<div class="owner-photo-grid">'+photos.map(p=>'<a href="/api/admin/photos/'+p.id+'" target="_blank" rel="noopener" title="'+esc(p.filename)+'"><img loading="lazy" src="/api/admin/photos/'+p.id+'" alt="'+esc(p.filename)+'"></a>').join('')+'</div>';
+ }catch(e){if(target.isConnected)target.textContent='Unable to load photos: '+e.message}
+}
+const ownerPhotoStyle=document.createElement('style');ownerPhotoStyle.textContent='#ownerView .owner-photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:12px}#ownerView .owner-photo-grid img{width:100%;height:130px;object-fit:cover;border-radius:9px;border:1px solid #dce5ec}';document.head.appendChild(ownerPhotoStyle);

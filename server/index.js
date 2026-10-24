@@ -11,7 +11,7 @@ import {calculate,DEFAULTS} from './logic.js';
 
 const app=express();app.disable('x-powered-by');
 const projectRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'200kb'}));
+app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'2mb'}));
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_SSL==='require'?{rejectUnauthorized:true}:undefined});
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
 // One Make scenario can route event_type to Barry or the customer.
@@ -49,11 +49,41 @@ app.post('/api/admin/logout',auth,wrap(async(req,res)=>{const t=parseCookies(req
 app.get('/api/admin/me',auth,(req,res)=>res.json(req.admin));
 app.get('/api/admin/enquiries',auth,wrap(async(req,res)=>{const {rows}=await pool.query('SELECT id,reference,job,status,created_at,updated_at FROM enquiries ORDER BY created_at DESC LIMIT 250');res.json(rows);}));
 app.get('/api/admin/enquiries/:id',auth,wrap(async(req,res)=>{const id=Number(req.params.id);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({error:'Invalid ID'});const e=await pool.query('SELECT * FROM enquiries WHERE id=$1',[id]);if(!e.rows[0])return res.status(404).json({error:'Not found'});const q=await pool.query('SELECT id,revision,quote,state,sent_at,viewed_at,accepted_at FROM quotes WHERE enquiry_id=$1 ORDER BY revision DESC',[id]);const m=await pool.query('SELECT * FROM messages WHERE enquiry_id=$1 ORDER BY created_at',[id]);const b=await pool.query('SELECT collection_date,arrival_window,quote_id FROM bookings WHERE enquiry_id=$1 LIMIT 1',[id]);res.json({...e.rows[0],quotes:q.rows,messages:m.rows,booking:b.rows[0]||null});}));
+const ensurePhotosTable=()=>pool.query("CREATE TABLE IF NOT EXISTS enquiry_photos (id BIGSERIAL PRIMARY KEY,enquiry_id BIGINT NOT NULL REFERENCES enquiries(id) ON DELETE CASCADE,filename TEXT NOT NULL,mime_type TEXT NOT NULL,data BYTEA NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+app.get('/api/admin/enquiries/:id/photos',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
+ await ensurePhotosTable();
+ const {rows}=await pool.query('SELECT id,filename,mime_type,octet_length(data) AS size FROM enquiry_photos WHERE enquiry_id=$1 ORDER BY id',[req.params.id]);
+ res.json(rows);
+}));
+app.get('/api/admin/photos/:id',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid photo'});
+ await ensurePhotosTable();
+ const {rows}=await pool.query('SELECT mime_type,data FROM enquiry_photos WHERE id=$1',[req.params.id]);
+ if(!rows[0])return res.status(404).json({error:'Photo not found'});
+ res.set({'Content-Type':rows[0].mime_type,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'});
+ res.send(rows[0].data);
+}));
 app.post('/api/enquiries',rateLimit({windowMs:15*60*1000,limit:20}),wrap(async(req,res)=>{
  const job=req.body?.job;
  if(!job||typeof job!=='object'||typeof job.from!=='string'||job.from.trim().length<3||typeof job.to!=='string'||job.to.trim().length<3||typeof job.name!=='string'||job.name.trim().length<2||typeof job.email!=='string'||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(job.email)||!job.acknowledge)return res.status(400).json({error:'Incomplete enquiry'});
- const {rows}=await pool.query('INSERT INTO enquiries(job) VALUES($1) RETURNING id,reference',[JSON.stringify(job)]);
+ const photos=req.body?.photos||[];
+ if(!Array.isArray(photos)||photos.length>5)return res.status(400).json({error:'Maximum five photos'});
+ const decoded=[];
+ for(const p of photos){
+  if(!p||p.mime_type!=='image/webp'||typeof p.content_base64!=='string'||p.content_base64.length>600000||!p.content_base64.length)return res.status(400).json({error:'Invalid compressed photo'});
+  const data=Buffer.from(p.content_base64,'base64');
+  if(data.length>450000||data.length<20||data.subarray(0,4).toString('ascii')!=='RIFF'||data.subarray(8,12).toString('ascii')!=='WEBP')return res.status(400).json({error:'Invalid WebP photo'});
+  decoded.push({data,filename:String(p.filename||'photo.webp').slice(0,150)});
+ }
+ await ensurePhotosTable();
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const {rows}=await c.query('INSERT INTO enquiries(job) VALUES($1) RETURNING id,reference',[JSON.stringify(job)]);
+ for(const p of decoded)await c.query('INSERT INTO enquiry_photos(enquiry_id,filename,mime_type,data) VALUES($1,$2,$3,$4)',[rows[0].id,p.filename,'image/webp',p.data]);
+ await c.query('COMMIT');
  res.status(201).json(rows[0]);
+ }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
 }));
 app.get('/api/admin/settings',auth,wrap(async(req,res)=>{const {rows}=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json(rows[0]?.value||DEFAULTS);}));
 app.put('/api/admin/settings',auth,wrap(async(req,res)=>{const s=req.body;const out={};for(const [key,value] of Object.entries(DEFAULTS)){const v=Number(s?.[key]);if(!Number.isFinite(v)||v<0||v>100000)return res.status(400).json({error:'Invalid rate: '+key});out[key]=v;}await pool.query("INSERT INTO settings(key,value) VALUES('rates',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[JSON.stringify(out)]);res.json(out);}));

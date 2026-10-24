@@ -63,6 +63,28 @@ app.post('/api/admin/enquiries/:id/drafts',auth,wrap(async(req,res)=>{
  const client=await pool.connect();try{await client.query('BEGIN');const en=await client.query('SELECT job FROM enquiries WHERE id=$1 FOR UPDATE',[id]);if(!en.rows[0]){await client.query('ROLLBACK');return res.status(404).json({error:'Not found'});}const s=await client.query("SELECT value FROM settings WHERE key='rates'");const calculated=calculate(en.rows[0].job,s.rows[0]?.value||DEFAULTS,req.body?.overrides||{});if(!calculated.eligible){await client.query('ROLLBACK');return res.status(422).json({error:'Complete route, handling and feasibility checks before preparing a quote',flags:calculated.flags});}const latest=await client.query('SELECT COALESCE(MAX(revision),0)+1 AS revision FROM quotes WHERE enquiry_id=$1',[id]);const revision=latest.rows[0].revision;const quote={...calculated,scope,validUntil,revision,preparedAt:new Date().toISOString()};const {rows}=await client.query("INSERT INTO quotes(enquiry_id,revision,quote,state) VALUES($1,$2,$3,'draft') RETURNING id,revision,state",[id,revision,JSON.stringify(quote)]);await client.query("UPDATE enquiries SET status='draft_ready',updated_at=now() WHERE id=$1",[id]);await client.query('COMMIT');res.status(201).json(rows[0]);}catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }));
 
+app.post('/api/admin/enquiries/:id/revise',auth,wrap(async(req,res)=>{
+ const id=Number(req.params.id),scope=String(req.body?.scope||'').trim(),validUntil=String(req.body?.validUntil||''),total=Number(req.body?.total);
+ if(!Number.isSafeInteger(id)||id<1||!scope||scope.length>3000||!/^\\d{4}-\\d{2}-\\d{2}$/.test(validUntil)||!Number.isFinite(total)||total<=0||total>1000000)return res.status(400).json({error:'Provide a valid scope, expiry date and positive total price'});
+ if(Date.parse(validUntil+'T23:59:59Z')<Date.now())return res.status(400).json({error:'Validity date cannot be in the past'});
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const en=await c.query('SELECT id,status FROM enquiries WHERE id=$1 FOR UPDATE',[id]);
+ if(!en.rows[0]){await c.query('ROLLBACK');return res.status(404).json({error:'Enquiry not found'})}
+ if(en.rows[0].status!=='change_requested'){await c.query('ROLLBACK');return res.status(409).json({error:'Revisions are only available for customer change requests'})}
+ const prev=await c.query('SELECT quote,revision FROM quotes WHERE enquiry_id=$1 ORDER BY revision DESC LIMIT 1',[id]);
+ if(!prev.rows[0]){await c.query('ROLLBACK');return res.status(409).json({error:'No previous quotation'})}
+ const old=prev.rows[0].quote,revision=prev.rows[0].revision+1;
+ const vatRate=Number(old.net)>0?Number(old.tax||0)/Number(old.net):0.23;
+ const net=Number((total/(1+vatRate)).toFixed(2)),tax=Number((total-net).toFixed(2));
+ const quote={...old,scope,validUntil,revision,total:Number(total.toFixed(2)),net,tax,manualRevision:true,previousTotal:old.total,preparedAt:new Date().toISOString()};
+ const {rows}=await c.query("INSERT INTO quotes(enquiry_id,revision,quote,state) VALUES($1,$2,$3,'draft') RETURNING id,revision,state",[id,revision,JSON.stringify(quote)]);
+ await c.query("UPDATE enquiries SET status='draft_ready',updated_at=now() WHERE id=$1",[id]);
+ await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','revision_prepared',$3)",[id,rows[0].id,'Revision '+revision+' prepared following customer changes']);
+ await c.query('COMMIT');res.status(201).json(rows[0]);
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
+
 const quoteUrl=t=>`${(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com').replace(/\/$/,'')}/quote/${encodeURIComponent(t)}`;
 const validId=x=>Number.isSafeInteger(Number(x))&&Number(x)>0;
 const customerQuote=wrap(async(req,res,next)=>{const t=String(req.params.token||'');if(!/^[A-Za-z0-9_-]{40,100}$/.test(t))return res.status(404).json({error:'Quote not found'});const {rows}=await pool.query("SELECT q.id,q.enquiry_id,q.revision,q.quote,q.state,q.viewed_at,e.reference,e.job,e.status FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.customer_token_hash=$1 AND q.state IN ('sent','accepted')",[sha(t)]);if(!rows[0])return res.status(404).json({error:'Quote not found'});req.customerQuote=rows[0];next()});

@@ -1,0 +1,9 @@
+{
+  "name": "valet-removals-integrated",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"start": "node server/index.js", "check": "node --check server/index.js && node --check server/logic.js"},
+  "engines": {"node": ">=20"},
+  "dependencies": {"express": "^4.21.2", "pg": "^8.13.1", "bcryptjs": "^2.4.3", "helmet": "^8.0.0", "express-rate-limit": "^7.5.0"}
+}

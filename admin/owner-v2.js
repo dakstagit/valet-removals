@@ -79,7 +79,7 @@ async function loadOwnerPhotos(enquiryId){
  const target=$('#ownerPhotos');if(!target)return;
  try{
   const photos=await api('/api/admin/enquiries/'+enquiryId+'/photos');
-  if(selected!==enquiryId||!target.isConnected)return;
+  if(Number(selected)!==Number(enquiryId)||!target.isConnected)return;
   if(!photos.length){target.textContent='No photos uploaded.';return}
   target.innerHTML='<div class="owner-photo-grid">'+photos.map(p=>'<a href="/api/admin/photos/'+p.id+'" target="_blank" rel="noopener" title="'+esc(p.filename)+'"><img loading="lazy" src="/api/admin/photos/'+p.id+'" alt="'+esc(p.filename)+'"></a>').join('')+'</div>';
  }catch(e){if(target.isConnected)target.textContent='Unable to load photos: '+e.message}

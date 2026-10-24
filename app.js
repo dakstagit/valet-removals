@@ -52,6 +52,11 @@ async function submitJob(){
  try{
   const attachments=await Promise.all(photos.map(async p=>({filename:p.name,mime_type:p.file.type,content_base64:await photoData(p.file)})));
   const payload={source:'Valet Removals Phase 1',type:'removals_enquiry',submitted_at:new Date().toISOString(),plain_text_summary:plainSummary(job),...job,photos:attachments};
+  // Save the enquiry before notifying the owner; never claim success if persistence fails.
+  const saved=await fetch('/api/enquiries',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job})});
+  if(!saved.ok)throw new Error('Unable to save your enquiry ('+saved.status+').');
+  const record=await saved.json();
+  payload.reference=record.reference;
   const response=await fetch(WEBHOOK,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   if(!response.ok)throw new Error('The enquiry service returned '+response.status+'.');
   $('#wizard').hidden=true;$('#success').hidden=false;

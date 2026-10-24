@@ -10,6 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {calculate,DEFAULTS} from './logic.js';
 
 const app=express();app.disable('x-powered-by');
+const projectRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'200kb'}));
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_SSL==='require'?{rejectUnauthorized:true}:undefined});
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
@@ -46,6 +47,7 @@ app.post('/api/admin/enquiries/:id/drafts',auth,wrap(async(req,res)=>{
  const client=await pool.connect();try{await client.query('BEGIN');const en=await client.query('SELECT job FROM enquiries WHERE id=$1 FOR UPDATE',[id]);if(!en.rows[0]){await client.query('ROLLBACK');return res.status(404).json({error:'Not found'});}const s=await client.query("SELECT value FROM settings WHERE key='rates'");const calculated=calculate(en.rows[0].job,s.rows[0]?.value||DEFAULTS,req.body?.overrides||{});if(!calculated.eligible){await client.query('ROLLBACK');return res.status(422).json({error:'Complete route, handling and feasibility checks before preparing a quote',flags:calculated.flags});}const latest=await client.query('SELECT COALESCE(MAX(revision),0)+1 AS revision FROM quotes WHERE enquiry_id=$1',[id]);const revision=latest.rows[0].revision;const quote={...calculated,scope,validUntil,revision,preparedAt:new Date().toISOString()};const {rows}=await client.query("INSERT INTO quotes(enquiry_id,revision,quote,state) VALUES($1,$2,$3,'draft') RETURNING id,revision,state",[id,revision,JSON.stringify(quote)]);await client.query("UPDATE enquiries SET status='draft_ready',updated_at=now() WHERE id=$1",[id]);await client.query('COMMIT');res.status(201).json(rows[0]);}catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}
 }));
 app.use('/api',(req,res)=>res.status(404).json({error:'Endpoint not found'}));
+app.use(express.static(projectRoot,{index:'index.html',dotfiles:'deny',extensions:false}));
 const adminPage=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../admin/index.html');
 app.get(['/admin','/admin/'],wrap(async(req,res)=>res.type('html').send(await readFile(adminPage,'utf8'))));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server error'});});

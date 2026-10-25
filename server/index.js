@@ -82,6 +82,41 @@ app.post('/api/admin/logout',auth,wrap(async(req,res)=>{const t=parseCookies(req
 app.get('/api/admin/me',auth,(req,res)=>res.json(req.admin));
 app.get('/api/admin/enquiries',auth,wrap(async(req,res)=>{const {rows}=await pool.query('SELECT id,reference,job,status,created_at,updated_at FROM enquiries ORDER BY created_at DESC LIMIT 250');res.json(rows);}));
 app.get('/api/admin/enquiries/:id',auth,wrap(async(req,res)=>{const id=Number(req.params.id);if(!Number.isSafeInteger(id)||id<1)return res.status(400).json({error:'Invalid ID'});const e=await pool.query('SELECT * FROM enquiries WHERE id=$1',[id]);if(!e.rows[0])return res.status(404).json({error:'Not found'});const q=await pool.query('SELECT id,revision,quote,state,sent_at,viewed_at,accepted_at FROM quotes WHERE enquiry_id=$1 ORDER BY revision DESC',[id]);const m=await pool.query('SELECT * FROM messages WHERE enquiry_id=$1 ORDER BY created_at',[id]);const b=await pool.query('SELECT collection_date,arrival_window,quote_id FROM bookings WHERE enquiry_id=$1 LIMIT 1',[id]);res.json({...e.rows[0],quotes:q.rows,messages:m.rows,booking:b.rows[0]||null});}));
+const ensureDeskTables=()=>pool.query(`CREATE TABLE IF NOT EXISTS owner_notes(id BIGSERIAL PRIMARY KEY,enquiry_id BIGINT NOT NULL REFERENCES enquiries(id) ON DELETE CASCADE,admin_id BIGINT REFERENCES admins(id),body TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now());CREATE INDEX IF NOT EXISTS owner_notes_enquiry_idx ON owner_notes(enquiry_id,created_at DESC);`);
+app.get('/api/admin/dashboard',auth,wrap(async(req,res)=>{
+ const {rows}=await pool.query(`SELECT e.id,e.reference,e.status,e.created_at,e.job->>'name' AS name,e.job->>'email' AS email,e.job->>'phone' AS phone,
+ q.quote->>'total' AS total,b.collection_date,b.arrival_window
+ FROM enquiries e LEFT JOIN LATERAL(SELECT quote FROM quotes WHERE enquiry_id=e.id ORDER BY revision DESC LIMIT 1) q ON true
+ LEFT JOIN bookings b ON b.enquiry_id=e.id ORDER BY e.created_at DESC LIMIT 500`);
+ const counts=Object.fromEntries(['needs_review','draft_ready','quote_sent','change_requested','accepted','booked'].map(x=>[x,rows.filter(r=>r.status===x).length]));
+ const booked=rows.filter(r=>r.status==='booked');
+ res.json({counts,total:rows.length,booked_value:booked.reduce((n,r)=>n+(Number(r.total)||0),0),jobs:rows});
+}));
+app.get('/api/admin/enquiries/:id/notes',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
+ await ensureDeskTables();
+ const {rows}=await pool.query('SELECT n.id,n.body,n.created_at,a.username AS author FROM owner_notes n LEFT JOIN admins a ON a.id=n.admin_id WHERE n.enquiry_id=$1 ORDER BY n.created_at DESC',[req.params.id]);
+ res.json(rows);
+}));
+app.post('/api/admin/enquiries/:id/notes',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
+ const body=String(req.body?.body||'').trim();
+ if(body.length<2||body.length>3000)return res.status(400).json({error:'Note must be 2–3000 characters'});
+ await ensureDeskTables();
+ const {rows}=await pool.query('INSERT INTO owner_notes(enquiry_id,admin_id,body) VALUES($1,$2,$3) RETURNING id,body,created_at',[req.params.id,req.admin.id,body]);
+ res.status(201).json(rows[0]);
+}));
+app.get('/api/admin/customers',auth,wrap(async(req,res)=>{
+ const {rows}=await pool.query(`SELECT lower(trim(job->>'email')) AS email,max(job->>'name') AS name,max(job->>'phone') AS phone,count(*)::int AS enquiries,
+ max(created_at) AS last_enquiry,array_agg(reference ORDER BY created_at DESC) AS references
+ FROM enquiries WHERE coalesce(trim(job->>'email'),'')<>'' GROUP BY lower(trim(job->>'email')) ORDER BY last_enquiry DESC LIMIT 500`);
+ res.json(rows);
+}));
+app.get('/api/admin/calendar',auth,wrap(async(req,res)=>{
+ const {rows}=await pool.query(`SELECT b.enquiry_id,e.reference,e.job->>'name' AS name,e.job->>'from' AS origin,e.job->>'to' AS destination,b.collection_date,b.arrival_window
+ FROM bookings b JOIN enquiries e ON e.id=b.enquiry_id ORDER BY b.collection_date,b.arrival_window LIMIT 500`);
+ res.json(rows);
+}));
 const ensurePhotosTable=()=>pool.query("CREATE TABLE IF NOT EXISTS enquiry_photos (id BIGSERIAL PRIMARY KEY,enquiry_id BIGINT NOT NULL REFERENCES enquiries(id) ON DELETE CASCADE,filename TEXT NOT NULL,mime_type TEXT NOT NULL,data BYTEA NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())");
 app.get('/api/admin/enquiries/:id/photos',auth,wrap(async(req,res)=>{
  if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});

@@ -117,6 +117,75 @@ app.get('/api/admin/calendar',auth,wrap(async(req,res)=>{
  FROM bookings b JOIN enquiries e ON e.id=b.enquiry_id ORDER BY b.collection_date,b.arrival_window LIMIT 500`);
  res.json(rows);
 }));
+
+const ensureOperationsTables=()=>pool.query(`CREATE TABLE IF NOT EXISTS owner_payments(
+ enquiry_id BIGINT PRIMARY KEY REFERENCES enquiries(id) ON DELETE CASCADE,
+ deposit_due NUMERIC(12,2) NOT NULL DEFAULT 0,
+ deposit_paid NUMERIC(12,2) NOT NULL DEFAULT 0,
+ balance_paid NUMERIC(12,2) NOT NULL DEFAULT 0,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ CREATE TABLE IF NOT EXISTS quote_followups(
+ quote_id BIGINT PRIMARY KEY REFERENCES quotes(id) ON DELETE CASCADE,
+ last_queued_at TIMESTAMPTZ,
+ queued_count INTEGER NOT NULL DEFAULT 0);
+`);
+app.get('/api/admin/enquiries/:id/payments',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
+ await ensureOperationsTables();
+ const {rows}=await pool.query(`SELECT p.deposit_due,p.deposit_paid,p.balance_paid,p.updated_at,
+ (SELECT (q.quote->>'total')::numeric FROM quotes q WHERE q.enquiry_id=e.id ORDER BY q.revision DESC LIMIT 1) AS total
+ FROM enquiries e LEFT JOIN owner_payments p ON p.enquiry_id=e.id WHERE e.id=$1`,[req.params.id]);
+ if(!rows[0])return res.status(404).json({error:'Enquiry not found'});
+ const x=rows[0],total=Number(x.total)||0,depositDue=Number(x.deposit_due)||0,depositPaid=Number(x.deposit_paid)||0,balancePaid=Number(x.balance_paid)||0;
+ res.json({total,deposit_due:depositDue,deposit_paid:depositPaid,balance_paid:balancePaid,outstanding:Math.max(0,Math.round((total-depositPaid-balancePaid)*100)/100)});
+}));
+app.put('/api/admin/enquiries/:id/payments',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
+ const amounts=['deposit_due','deposit_paid','balance_paid'].map(k=>Number(req.body?.[k]));
+ if(amounts.some(n=>!Number.isFinite(n)||n<0||n>1000000))return res.status(400).json({error:'Enter valid non-negative payment amounts'});
+ await ensureOperationsTables();
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const {rows}=await c.query("SELECT status FROM enquiries WHERE id=$1 FOR UPDATE",[req.params.id]);
+ if(!rows[0]){await c.query('ROLLBACK');return res.status(404).json({error:'Enquiry not found'})}
+ if(!['accepted','booked'].includes(rows[0].status)){await c.query('ROLLBACK');return res.status(409).json({error:'Payment tracking starts after customer acceptance'})}
+ const q=await c.query("SELECT (quote->>'total')::numeric AS total FROM quotes WHERE enquiry_id=$1 ORDER BY revision DESC LIMIT 1",[req.params.id]);
+ const total=Number(q.rows[0]?.total)||0;
+ if(amounts[0]>total||amounts[1]+amounts[2]>total){await c.query('ROLLBACK');return res.status(400).json({error:'Amounts exceed the agreed quotation total'})}
+ await c.query(`INSERT INTO owner_payments(enquiry_id,deposit_due,deposit_paid,balance_paid) VALUES($1,$2,$3,$4)
+ ON CONFLICT(enquiry_id) DO UPDATE SET deposit_due=$2,deposit_paid=$3,balance_paid=$4,updated_at=now()`,[req.params.id,...amounts]);
+ await c.query("INSERT INTO messages(enquiry_id,sender,kind,body) VALUES($1,'owner','payment_updated',$2)",[req.params.id,'Deposit received €'+amounts[1].toFixed(2)+'; other payments €'+amounts[2].toFixed(2)]);
+ await c.query('COMMIT');res.json({ok:true,outstanding:Math.max(0,total-amounts[1]-amounts[2])});
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
+app.get('/api/admin/followups',auth,wrap(async(req,res)=>{
+ await ensureOperationsTables();
+ const {rows}=await pool.query(`SELECT q.id AS quote_id,e.id AS enquiry_id,e.reference,e.job->>'name' AS name,
+ e.job->>'email' AS email,q.sent_at,q.viewed_at,f.last_queued_at,f.queued_count
+ FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id LEFT JOIN quote_followups f ON f.quote_id=q.id
+ WHERE q.state='sent' AND e.status='quote_sent' AND q.sent_at<now()-interval '48 hours'
+ ORDER BY q.sent_at LIMIT 100`);
+ res.json({enabled:process.env.ENABLE_QUOTE_FOLLOWUPS==='true',candidates:rows});
+}));
+app.post('/api/admin/followups/:id/queue',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid quote'});
+ if(process.env.ENABLE_QUOTE_FOLLOWUPS!=='true')return res.status(409).json({error:'Follow-ups disabled. Configure a quote_followup route in Make and set ENABLE_QUOTE_FOLLOWUPS=true.'});
+ await ensureOperationsTables();await ensureOutbox();
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const {rows}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,q.viewed_at,e.status,e.reference,e.job
+ FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='sent' FOR UPDATE OF q`,[req.params.id]);
+ const q=rows[0];if(!q||q.status!=='quote_sent'||!q.sent_at||Date.now()-new Date(q.sent_at).getTime()<48*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Not eligible for follow-up'})}
+ const last=await c.query('SELECT last_queued_at,queued_count FROM quote_followups WHERE quote_id=$1',[q.id]);
+ const n=last.rows[0]?.queued_count||0;
+ if(n>=2||last.rows[0]?.last_queued_at&&Date.now()-new Date(last.rows[0].last_queued_at).getTime()<72*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Follow-up limit or cooldown reached'})}
+ const key='followup:'+q.id+':'+(n+1);
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,followup_number:n+1});
+ await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
+ ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
+ await c.query('COMMIT');res.json({ok:true,event_key:key});void processDeliveries();
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
 const ensurePhotosTable=()=>pool.query("CREATE TABLE IF NOT EXISTS enquiry_photos (id BIGSERIAL PRIMARY KEY,enquiry_id BIGINT NOT NULL REFERENCES enquiries(id) ON DELETE CASCADE,filename TEXT NOT NULL,mime_type TEXT NOT NULL,data BYTEA NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now())");
 app.get('/api/admin/enquiries/:id/photos',auth,wrap(async(req,res)=>{
  if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});

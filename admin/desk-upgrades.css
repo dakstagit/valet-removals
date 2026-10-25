@@ -53,3 +53,13 @@
 #ownerView .desk-settings-form .desk-toggle input{width:18px;height:18px}
 #ownerView .desk-settings-warning{color:#97531a;background:#fff7e8;border-radius:8px;padding:12px}
 #ownerView .desk-settings-form button{justify-self:start}
+
+header .owner-nav-actions{display:flex;align-items:center;gap:10px;margin-left:auto}
+header .owner-nav-actions .button{white-space:nowrap}
+header #ownerSettings.active{background:#008c83;color:#fff;border-color:#008c83}
+#ownerView .desk-settings-divider{height:1px;background:#e1e8ef;margin:30px 0}
+#ownerView #settingsPanel.settings-panel{padding:0}
+#ownerView #settingsPanel .rates-heading{margin-bottom:16px}
+#ownerView #settingsPanel .rates-group{background:#fafcfd}
+#ownerView #deskAux:has(#followupSettings)>.desk-panel{max-width:none}
+@media(max-width:650px){header .owner-nav-actions{gap:6px}header .owner-nav-actions .button{padding:9px 10px;font-size:12px}}

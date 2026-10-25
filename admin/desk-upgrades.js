@@ -20,6 +20,7 @@ function calendarHtml(items){
 function customerHtml(customers){const filtered=customers.filter(x=>[x.name,x.email,x.phone,...(x.references||[])].some(v=>String(v||'').toLowerCase().includes(customerSearch.toLowerCase())));return '<div class="desk-panel"><h2>Customer CRM</h2><input id="customerSearch" class="desk-customer-search" type="search" placeholder="Search customers…" value="'+esc(customerSearch)+'"><div class="desk-customer-grid">'+filtered.map(x=>'<article class="desk-customer"><strong>'+esc(x.name)+'</strong><a href="mailto:'+encodeURIComponent(x.email)+'">'+esc(x.email)+'</a><span>'+esc(x.phone)+'</span><small>'+x.enquiries+' enquiries · Last '+date(x.last_enquiry)+'</small><details><summary>Job history</summary>'+jobs.filter(j=>String(j.email||'').toLowerCase()===String(x.email).toLowerCase()).map(j=>'<button class="desk-customer-job" data-open="'+j.id+'">'+esc(j.reference)+' · '+esc(j.status.replaceAll('_',' '))+'</button>').join('')+'</details></article>').join('')+'</div></div>'}
 async function showView(){
  document.querySelectorAll('.desk-tab').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+$('#ownerSettings')?.classList.toggle('active',view==='settings');
  $('#deskPipeline').hidden=view!=='pipeline';$('#deskAux').hidden=view==='pipeline';
  if(view==='pipeline'){applyFilters();return}
  $('#deskAux').innerHTML='<div class="desk-panel">Loading…</div>';
@@ -40,7 +41,8 @@ async function showView(){
 }
 function wireCalendar(items){wireOpen();document.querySelectorAll('[data-month]').forEach(b=>b.onclick=()=>{calendarMonth=new Date(calendarMonth.getFullYear(),calendarMonth.getMonth()+Number(b.dataset.month),1);$('#deskAux').innerHTML=calendarHtml(items);wireCalendar(items)})}
 async function refresh(){try{const d=await api('/api/admin/dashboard');jobs=d.jobs;dashboard(d);loaded=true;await showView()}catch(e){console.warn(e.message)}}
-document.querySelectorAll('.desk-tab').forEach(b=>b.onclick=()=>{view=b.dataset.view;void showView()});['#deskSearch','#deskFilter','#deskSort'].forEach(s=>$(s)?.addEventListener(s==='#deskSearch'?'input':'change',applyFilters));
+document.querySelectorAll('.desk-tab').forEach(b=>b.onclick=()=>{view=b.dataset.view;void showView()});
+$('#ownerSettings').onclick=()=>{view='settings';void showView();window.scrollTo({top:0,behavior:'smooth'})};['#deskSearch','#deskFilter','#deskSort'].forEach(s=>$(s)?.addEventListener(s==='#deskSearch'?'input':'change',applyFilters));
 const observer=new MutationObserver(()=>{if(!$('#ownerView').hidden&&!loaded)void refresh()});observer.observe($('#ownerView'),{attributes:true,attributeFilter:['hidden']});if(!$('#ownerView').hidden)void refresh();
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-save-note]');if(!b)return;const id=b.dataset.saveNote,input=$('#ownerNoteInput');if(!input?.value.trim())return;b.disabled=true;try{const r=await fetch('/api/admin/enquiries/'+id+'/notes',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:input.value})});if(!r.ok)throw Error('Could not save note');input.value='';await notes(id)}catch(err){alert(err.message)}finally{b.disabled=false}});
 async function notes(id){try{const items=await api('/api/admin/enquiries/'+id+'/notes');const area=$('#ownerNotesList');if(area)area.innerHTML=items.map(n=>'<article class="desk-note"><small>'+esc(n.author)+' · '+date(n.created_at)+'</small><p>'+esc(n.body)+'</p></article>').join('')||'<p>No internal notes yet.</p>'}catch(e){console.warn(e.message)}}

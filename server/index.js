@@ -287,6 +287,8 @@ for(const asset of ['styles.css','app.js','valet-van.png'])app.get('/'+asset,(re
 
 const adminPage=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../admin/index.html');
 app.get('/journey.css',(req,res)=>res.sendFile(path.join(projectRoot,'journey.css')));
+app.get('/admin/desk-upgrades.js',(req,res)=>res.type('javascript').sendFile(path.join(projectRoot,'admin/desk-upgrades.js')));
+app.get('/admin/desk-upgrades.css',(req,res)=>res.type('css').sendFile(path.join(projectRoot,'admin/desk-upgrades.css')));
 app.get('/admin/owner.js',(req,res)=>res.sendFile(path.join(projectRoot,'admin/owner.js')));app.get('/admin/owner-v2.js',(req,res)=>res.sendFile(path.join(projectRoot,'admin/owner-v2.js')));
 app.get(['/admin','/admin/'],wrap(async(req,res)=>res.type('html').send(await readFile(adminPage,'utf8'))));
 app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:'Server error'});});

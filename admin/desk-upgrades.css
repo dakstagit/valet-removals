@@ -36,3 +36,12 @@
 #ownerView .desk-editor{padding:18px;background:#f7fafc;border:1px solid #e1e8ef;border-radius:12px;margin-top:18px}
 #ownerView .queue-item[hidden]{display:none!important}
 @media(max-width:760px){#ownerView .desk-month-grid{gap:2px}#ownerView .desk-day{min-height:75px;padding:4px}#ownerView .desk-weekday{font-size:10px}#ownerView .desk-calendar-entry{font-size:10px;padding:3px}#ownerView .desk-payment-inputs{grid-template-columns:1fr}#ownerView .desk-board{grid-template-columns:repeat(6,220px)}}
+
+#ownerView .queue-item{border-left:5px solid transparent!important;transition:background .15s,border-color .15s}
+#ownerView .queue-item.stage-needs_review{border-left-color:#e59a36!important;background:#fffaf3}
+#ownerView .queue-item.stage-change_requested{border-left-color:#d66d43!important;background:#fff5f0}
+#ownerView .queue-item.stage-draft_ready{border-left-color:#527fca!important;background:#f3f7ff}
+#ownerView .queue-item.stage-quote_sent{border-left-color:#2288d1!important;background:#f0f8ff}
+#ownerView .queue-item.stage-accepted{border-left-color:#23945d!important;background:#effbf3}
+#ownerView .queue-item.stage-booked{border-left-color:#008c83!important;background:#eaf9f6}
+#ownerView .queue-item.selected{outline:2px solid #008e87;outline-offset:-2px}

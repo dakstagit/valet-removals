@@ -104,3 +104,8 @@ header #ownerSettings.active{background:#008c83;color:#fff;border-color:#008c83}
 @media(max-width:1050px){#ownerView .quote-detail .owner-calculator .settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){#ownerView .quote-detail .detail-body{padding:14px;gap:16px}#ownerView .quote-detail .owner-primary-section,#ownerView .quote-detail .owner-secondary-section,#ownerView .quote-detail .booked-panel{padding:18px!important}#ownerView .quote-detail .owner-review-grid{grid-template-columns:1fr;gap:10px}#ownerView .quote-detail .owner-review-grid .summary-field{min-height:0;padding:16px!important}#ownerView .quote-detail .owner-calculator .settings-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}#ownerView .quote-detail .owner-calculator .verification{padding:16px;gap:15px}#ownerView .quote-detail .owner-action-footer{align-items:stretch}#ownerView .quote-detail .owner-action-footer .button{width:100%}#ownerView .quote-detail .owner-section-head{flex-direction:column;gap:12px}}
 @media(max-width:420px){#ownerView .quote-detail .owner-calculator .settings-grid{grid-template-columns:1fr}}
+
+header .owner-nav-actions{margin-left:auto;display:flex;align-items:center;gap:12px}
+header .owner-desk-label{margin-right:14px;white-space:nowrap}
+header .owner-nav-actions [hidden]{display:none!important}
+@media(max-width:650px){header .owner-desk-label{display:none}}

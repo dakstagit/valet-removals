@@ -46,7 +46,7 @@ async function revise(){const scope=$('#revisionScope').value.trim(),total=Numbe
 async function send(id){if(!confirm('Approve and send this quotation?'))return;try{await api('/api/admin/quotes/'+id+'/send',{method:'POST',body:'{}'});await load();toast('Quotation submitted to Make')}catch(e){toast(e.message)}}
 async function book(){try{await api('/api/admin/enquiries/'+selected+'/confirm-booking',{method:'POST',body:JSON.stringify({collectionDate:$('#bookingDate').value,arrivalWindow:$('#bookingWindow').value.trim()})});await load();toast('Booking confirmed')}catch(e){toast(e.message)}}
 $('#loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;$('#ownerSettings').hidden=false;await load()}catch(x){$('#loginError').textContent=x.message}};
-$('#logout').onclick=async()=>{await api('/api/admin/logout',{method:'POST'});$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true};
+$('#logout').onclick=async()=>{await api('/api/admin/logout',{method:'POST'});$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true;$('#ownerSettings').hidden=true};
 
 const rateMeta={
 one:['Labour & minimums','One-person hourly rate','€ / hour','Applied to eligible one-person jobs'],
@@ -75,7 +75,7 @@ groups.map(g=>{const entries=Object.entries(settings).filter(([k])=>(rateMeta[k]
 $('#saveRates').onclick=async()=>{const v={};document.querySelectorAll('[data-rate]').forEach(i=>v[i.dataset.rate]=Number(i.value));const btn=$('#saveRates');btn.disabled=true;try{settings=await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(v)});$('#rateFeedback').textContent='Settings saved successfully.';toast('Rates saved')}catch(e){$('#rateFeedback').textContent=e.message;toast(e.message)}finally{btn.disabled=false}};
 };
 
-api('/api/admin/me').then(async()=>{$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;await load()}).catch(()=>{$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true});
+api('/api/admin/me').then(async()=>{$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;$('#ownerSettings').hidden=false;await load()}).catch(()=>{$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true;$('#ownerSettings').hidden=true});
 
 async function sendWhatsapp(){const b=$('#sendWhatsapp');if(!b||!current?.quotes?.[0])return;const tab=window.open('about:blank','_blank');try{b.disabled=true;const d=await api('/api/admin/quotes/'+current.quotes[0].id+'/whatsapp-link',{method:'POST'});if(tab)tab.location.href=d.whatsapp_url;else{await navigator.clipboard.writeText(d.whatsapp_url);toast('WhatsApp link copied. Open it in a new tab.')}}catch(e){if(tab)tab.close();toast(e.message)}finally{b.disabled=false}}
 

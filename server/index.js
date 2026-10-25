@@ -175,6 +175,40 @@ app.put('/api/admin/enquiries/:id/payments',auth,wrap(async(req,res)=>{
  await c.query('COMMIT');res.json({ok:true,outstanding:Math.max(0,total-amounts[1]-amounts[2])});
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }));
+let followupWorkerRunning=false;
+async function queueAutomaticFollowups(){
+ if(process.env.ENABLE_QUOTE_FOLLOWUPS!=='true'||!process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL||followupWorkerRunning)return;
+ followupWorkerRunning=true;
+ try{
+ await ensureOperationsTables();await ensureOutbox();
+ const {rows}=await pool.query(`SELECT q.id FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id
+ LEFT JOIN quote_followups f ON f.quote_id=q.id
+ WHERE q.state='sent' AND e.status='quote_sent' AND q.sent_at<now()-interval '48 hours'
+ AND coalesce(f.queued_count,0)<2 AND (f.last_queued_at IS NULL OR f.last_queued_at<now()-interval '72 hours')
+ ORDER BY q.sent_at LIMIT 20`);
+ for(const item of rows){
+ const c=await pool.connect();
+ try{
+ await c.query('BEGIN');
+ const {rows:locked}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,e.status,e.reference,e.job
+ FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='sent' FOR UPDATE OF q`,[item.id]);
+ const q=locked[0];if(!q||q.status!=='quote_sent'){await c.query('ROLLBACK');continue}
+ const {rows:previous}=await c.query('SELECT queued_count,last_queued_at FROM quote_followups WHERE quote_id=$1 FOR UPDATE',[q.id]);
+ const count=previous[0]?.queued_count||0,last=previous[0]?.last_queued_at;
+ if(count>=2||last&&Date.now()-new Date(last).getTime()<72*3600000){await c.query('ROLLBACK');continue}
+ const key='followup:'+q.id+':'+(count+1);
+ const t=token(),hash=sha(t);
+ await c.query(`UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',coalesce(quote->'whatsappTokenHashes','[]'::jsonb)||to_jsonb($2::text),true) WHERE id=$1`,[q.id,hash]);
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,quote_url:quoteUrl(t),followup_number:count+1});
+ await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
+ ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
+ await c.query('COMMIT');
+ }catch(e){await c.query('ROLLBACK');console.error('Follow-up queue error',e)}finally{c.release()}
+ }
+ if(rows.length)void processDeliveries();
+ }catch(e){console.error('Follow-up worker error',e)}finally{followupWorkerRunning=false}
+}
+if(process.env.DATABASE_URL){setInterval(()=>{void queueAutomaticFollowups()},60*60*1000).unref()}
 app.get('/api/admin/followups',auth,wrap(async(req,res)=>{
  await ensureOperationsTables();
  const {rows}=await pool.query(`SELECT q.id AS quote_id,e.id AS enquiry_id,e.reference,e.job->>'name' AS name,

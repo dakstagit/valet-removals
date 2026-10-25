@@ -129,6 +129,23 @@ const ensureOperationsTables=()=>pool.query(`CREATE TABLE IF NOT EXISTS owner_pa
  last_queued_at TIMESTAMPTZ,
  queued_count INTEGER NOT NULL DEFAULT 0);
 `);
+app.put('/api/admin/quotes/:id/draft',auth,wrap(async(req,res)=>{
+ if(!validId(req.params.id))return res.status(400).json({error:'Invalid quotation'});
+ const scope=String(req.body?.scope||'').trim(),validUntil=String(req.body?.validUntil||''),total=Number(req.body?.total);
+ if(!scope||scope.length>3000||!/^\d{4}-\d{2}-\d{2}$/.test(validUntil)||!Number.isFinite(total)||total<=0||total>1000000)return res.status(400).json({error:'Valid scope, date and positive price required'});
+ if(Date.parse(validUntil+'T23:59:59Z')<Date.now())return res.status(400).json({error:'Expiry date must be in the future'});
+ const c=await pool.connect();try{
+ await c.query('BEGIN');
+ const {rows}=await c.query("SELECT q.quote,q.enquiry_id FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='draft' AND e.status='draft_ready' FOR UPDATE OF q",[req.params.id]);
+ if(!rows[0]){await c.query('ROLLBACK');return res.status(409).json({error:'Only unsent draft quotations can be edited'})}
+ const old=rows[0].quote,rate=Number(old.net)>0?Number(old.tax||0)/Number(old.net):0.23;
+ const net=Math.round(total/(1+rate)*100)/100,tax=Math.round((total-net)*100)/100;
+ const updated={...old,scope,validUntil,total:Math.round(total*100)/100,net,tax,manualAdjustment:true};
+ await c.query("UPDATE quotes SET quote=$1 WHERE id=$2",[JSON.stringify(updated),req.params.id]);
+ await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'owner','draft_edited','Updated unsent quotation')",[rows[0].enquiry_id,req.params.id]);
+ await c.query('COMMIT');res.json({ok:true,quote:updated});
+ }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
+}));
 app.get('/api/admin/enquiries/:id/payments',auth,wrap(async(req,res)=>{
  if(!validId(req.params.id))return res.status(400).json({error:'Invalid enquiry'});
  await ensureOperationsTables();

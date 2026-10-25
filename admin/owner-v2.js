@@ -65,8 +65,8 @@ extraStop:['Access & extra stops','Extra stop handling allowance','minutes / sto
 urgent:['Surcharges & waiting','Urgent / out-of-hours surcharge','% of labour','Only applied to urgent jobs'],
 waitGrace:['Surcharges & waiting','Waiting grace period','minutes','Stored setting; not currently used in quote calculation']
 };
-$('#settingsBtn').onclick=()=>{
-const p=$('#settingsPanel');p.hidden=!p.hidden;if(p.hidden)return;
+window.renderRateSettings=()=>{
+const p=$('#settingsPanel');if(!p)return;p.hidden=false;
 const groups=['Labour & minimums','Handling time','Access & extra stops','Surcharges & waiting'];
 p.innerHTML='<div class="rates-heading"><div><h2>Quotation pricing settings</h2><p>These values control how new quotations are calculated. Existing accepted quotations are not recalculated.</p></div><button class="button outline" id="closeRates" type="button">Close</button></div>'+
 groups.map(g=>{const entries=Object.entries(settings).filter(([k])=>(rateMeta[k]?.[0]||'Other')===g);return entries.length?'<section class="rates-group"><h3>'+esc(g)+'</h3><div class="rates-grid">'+entries.map(([k,v])=>{const m=rateMeta[k]||[g,k,'',''];return '<label class="rate-field"><span class="rate-label">'+esc(m[1])+'</span><span class="rate-input"><input data-rate="'+esc(k)+'" type="number" min="0" step="any" value="'+esc(v)+'"><em>'+esc(m[2])+'</em></span><small>'+esc(m[3])+'</small></label>'}).join('')+'</div></section>':''}).join('')+

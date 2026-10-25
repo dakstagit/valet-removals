@@ -45,3 +45,11 @@
 #ownerView .queue-item.stage-accepted{border-left-color:#23945d!important;background:#effbf3}
 #ownerView .queue-item.stage-booked{border-left-color:#008c83!important;background:#eaf9f6}
 #ownerView .queue-item.selected{outline:2px solid #008e87;outline-offset:-2px}
+
+#ownerView .desk-settings-form{display:grid;gap:16px;max-width:540px;margin:20px 0}
+#ownerView .desk-settings-form label{display:flex;flex-direction:column;gap:7px;font-weight:650;font-size:13px}
+#ownerView .desk-settings-form input[type=number]{padding:12px;border:1px solid #cbd8e3;border-radius:8px;max-width:240px}
+#ownerView .desk-settings-form .desk-toggle{flex-direction:row;align-items:center;font-size:15px;gap:10px}
+#ownerView .desk-settings-form .desk-toggle input{width:18px;height:18px}
+#ownerView .desk-settings-warning{color:#97531a;background:#fff7e8;border-radius:8px;padding:12px}
+#ownerView .desk-settings-form button{justify-self:start}

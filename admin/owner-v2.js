@@ -45,7 +45,7 @@ async function prepare(){try{await api('/api/admin/enquiries/'+selected+'/drafts
 async function revise(){const scope=$('#revisionScope').value.trim(),total=Number($('#revisionTotal').value),validUntil=$('#revisionValidUntil').value;if(!scope||!validUntil||!Number.isFinite(total)||total<=0){toast('Enter the revised scope, valid-until date and price');return}if(!confirm('Prepare a revised draft for approval? No email will be sent yet.'))return;try{await api('/api/admin/enquiries/'+selected+'/revise',{method:'POST',body:JSON.stringify({scope,total,validUntil})});await load();toast('Revised draft prepared. Review and approve it to send.')}catch(e){toast(e.message)}}
 async function send(id){if(!confirm('Approve and send this quotation?'))return;try{await api('/api/admin/quotes/'+id+'/send',{method:'POST',body:'{}'});await load();toast('Quotation submitted to Make')}catch(e){toast(e.message)}}
 async function book(){try{await api('/api/admin/enquiries/'+selected+'/confirm-booking',{method:'POST',body:JSON.stringify({collectionDate:$('#bookingDate').value,arrivalWindow:$('#bookingWindow').value.trim()})});await load();toast('Booking confirmed')}catch(e){toast(e.message)}}
-$('#loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;await load()}catch(x){$('#loginError').textContent=x.message}};
+$('#loginForm').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#loginPanel').hidden=true;$('#ownerView').hidden=false;$('#logout').hidden=false;$('#ownerSettings').hidden=false;await load()}catch(x){$('#loginError').textContent=x.message}};
 $('#logout').onclick=async()=>{await api('/api/admin/logout',{method:'POST'});$('#loginPanel').hidden=false;$('#ownerView').hidden=true;$('#logout').hidden=true};
 
 const rateMeta={
@@ -68,10 +68,10 @@ waitGrace:['Surcharges & waiting','Waiting grace period','minutes','Stored setti
 window.renderRateSettings=()=>{
 const p=$('#settingsPanel');if(!p)return;p.hidden=false;
 const groups=['Labour & minimums','Handling time','Access & extra stops','Surcharges & waiting'];
-p.innerHTML='<div class="rates-heading"><div><h2>Quotation pricing settings</h2><p>These values control how new quotations are calculated. Existing accepted quotations are not recalculated.</p></div><button class="button outline" id="closeRates" type="button">Close</button></div>'+
+p.innerHTML='<div class="rates-heading"><div><h2>Quotation pricing settings</h2><p>These values control how new quotations are calculated. Existing accepted quotations are not recalculated.</p></div></div>'+
 groups.map(g=>{const entries=Object.entries(settings).filter(([k])=>(rateMeta[k]?.[0]||'Other')===g);return entries.length?'<section class="rates-group"><h3>'+esc(g)+'</h3><div class="rates-grid">'+entries.map(([k,v])=>{const m=rateMeta[k]||[g,k,'',''];return '<label class="rate-field"><span class="rate-label">'+esc(m[1])+'</span><span class="rate-input"><input data-rate="'+esc(k)+'" type="number" min="0" step="any" value="'+esc(v)+'"><em>'+esc(m[2])+'</em></span><small>'+esc(m[3])+'</small></label>'}).join('')+'</div></section>':''}).join('')+
 '<div class="rates-actions"><button class="button teal" id="saveRates" type="button">Save pricing settings</button><span id="rateFeedback" role="status"></span></div>';
-$('#closeRates').onclick=()=>{p.hidden=true};
+
 $('#saveRates').onclick=async()=>{const v={};document.querySelectorAll('[data-rate]').forEach(i=>v[i.dataset.rate]=Number(i.value));const btn=$('#saveRates');btn.disabled=true;try{settings=await api('/api/admin/settings',{method:'PUT',body:JSON.stringify(v)});$('#rateFeedback').textContent='Settings saved successfully.';toast('Rates saved')}catch(e){$('#rateFeedback').textContent=e.message;toast(e.message)}finally{btn.disabled=false}};
 };
 

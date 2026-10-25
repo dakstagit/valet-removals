@@ -175,17 +175,29 @@ app.put('/api/admin/enquiries/:id/payments',auth,wrap(async(req,res)=>{
  await c.query('COMMIT');res.json({ok:true,outstanding:Math.max(0,total-amounts[1]-amounts[2])});
  }catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}
 }));
+const FOLLOWUP_DEFAULTS={enabled:false,firstDelayHours:48,repeatDelayHours:72,maxReminders:2};
+async function getFollowupSettings(){const {rows}=await pool.query("SELECT value FROM settings WHERE key='followups'");return {...FOLLOWUP_DEFAULTS,...(rows[0]?.value||{})}}
+app.get('/api/admin/settings/followups',auth,wrap(async(req,res)=>res.json(await getFollowupSettings())));
+app.put('/api/admin/settings/followups',auth,wrap(async(req,res)=>{
+ const b=req.body||{},enabled=b.enabled===true,firstDelayHours=Number(b.firstDelayHours),repeatDelayHours=Number(b.repeatDelayHours),maxReminders=Number(b.maxReminders);
+ if(typeof b.enabled!=='boolean'||!Number.isInteger(firstDelayHours)||firstDelayHours<24||firstDelayHours>720||!Number.isInteger(repeatDelayHours)||repeatDelayHours<24||repeatDelayHours>720||!Number.isInteger(maxReminders)||maxReminders<1||maxReminders>5)return res.status(400).json({error:'Invalid follow-up settings'});
+ if(enabled&&!process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL)return res.status(409).json({error:'Configure NOTIFICATIONS_MAKE_WEBHOOK_URL in Render before enabling reminders'});
+ const value={enabled,firstDelayHours,repeatDelayHours,maxReminders};
+ await pool.query("INSERT INTO settings(key,value) VALUES('followups',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[JSON.stringify(value)]);
+ res.json(value);
+}));
 let followupWorkerRunning=false;
 async function queueAutomaticFollowups(){
- if(process.env.ENABLE_QUOTE_FOLLOWUPS!=='true'||!process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL||followupWorkerRunning)return;
+ if(!process.env.NOTIFICATIONS_MAKE_WEBHOOK_URL||followupWorkerRunning)return;
  followupWorkerRunning=true;
  try{
+ const config=await getFollowupSettings();if(!config.enabled)return;
  await ensureOperationsTables();await ensureOutbox();
  const {rows}=await pool.query(`SELECT q.id FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id
  LEFT JOIN quote_followups f ON f.quote_id=q.id
- WHERE q.state='sent' AND e.status='quote_sent' AND q.sent_at<now()-interval '48 hours'
- AND coalesce(f.queued_count,0)<2 AND (f.last_queued_at IS NULL OR f.last_queued_at<now()-interval '72 hours')
- ORDER BY q.sent_at LIMIT 20`);
+ WHERE q.state='sent' AND e.status='quote_sent' AND q.sent_at<now()-($1::int * interval '1 hour')
+ AND coalesce(f.queued_count,0)<$2 AND (f.last_queued_at IS NULL OR f.last_queued_at<now()-($3::int * interval '1 hour'))
+ ORDER BY q.sent_at LIMIT 20`,[config.firstDelayHours,config.maxReminders,config.repeatDelayHours]);
  for(const item of rows){
  const c=await pool.connect();
  try{
@@ -195,7 +207,7 @@ async function queueAutomaticFollowups(){
  const q=locked[0];if(!q||q.status!=='quote_sent'){await c.query('ROLLBACK');continue}
  const {rows:previous}=await c.query('SELECT queued_count,last_queued_at FROM quote_followups WHERE quote_id=$1 FOR UPDATE',[q.id]);
  const count=previous[0]?.queued_count||0,last=previous[0]?.last_queued_at;
- if(count>=2||last&&Date.now()-new Date(last).getTime()<72*3600000){await c.query('ROLLBACK');continue}
+ if(count>=config.maxReminders||last&&Date.now()-new Date(last).getTime()<config.repeatDelayHours*3600000){await c.query('ROLLBACK');continue}
  const key='followup:'+q.id+':'+(count+1);
  const t=token(),hash=sha(t);
  await c.query(`UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',coalesce(quote->'whatsappTokenHashes','[]'::jsonb)||to_jsonb($2::text),true) WHERE id=$1`,[q.id,hash]);
@@ -216,20 +228,20 @@ app.get('/api/admin/followups',auth,wrap(async(req,res)=>{
  FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id LEFT JOIN quote_followups f ON f.quote_id=q.id
  WHERE q.state='sent' AND e.status='quote_sent' AND q.sent_at<now()-interval '48 hours'
  ORDER BY q.sent_at LIMIT 100`);
- res.json({enabled:process.env.ENABLE_QUOTE_FOLLOWUPS==='true',candidates:rows});
+ res.json({enabled:(await getFollowupSettings()).enabled,candidates:rows});
 }));
 app.post('/api/admin/followups/:id/queue',auth,wrap(async(req,res)=>{
  if(!validId(req.params.id))return res.status(400).json({error:'Invalid quote'});
- if(process.env.ENABLE_QUOTE_FOLLOWUPS!=='true')return res.status(409).json({error:'Follow-ups disabled. Configure a quote_followup route in Make and set ENABLE_QUOTE_FOLLOWUPS=true.'});
+ const config=await getFollowupSettings();if(!config.enabled)return res.status(409).json({error:'Follow-ups are disabled in Owner Desk settings'});
  await ensureOperationsTables();await ensureOutbox();
  const c=await pool.connect();try{
  await c.query('BEGIN');
  const {rows}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,q.viewed_at,e.status,e.reference,e.job
  FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='sent' FOR UPDATE OF q`,[req.params.id]);
- const q=rows[0];if(!q||q.status!=='quote_sent'||!q.sent_at||Date.now()-new Date(q.sent_at).getTime()<48*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Not eligible for follow-up'})}
+ const q=rows[0];if(!q||q.status!=='quote_sent'||!q.sent_at||Date.now()-new Date(q.sent_at).getTime()<config.firstDelayHours*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Not eligible for follow-up'})}
  const last=await c.query('SELECT last_queued_at,queued_count FROM quote_followups WHERE quote_id=$1',[q.id]);
  const n=last.rows[0]?.queued_count||0;
- if(n>=2||last.rows[0]?.last_queued_at&&Date.now()-new Date(last.rows[0].last_queued_at).getTime()<72*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Follow-up limit or cooldown reached'})}
+ if(n>=config.maxReminders||last.rows[0]?.last_queued_at&&Date.now()-new Date(last.rows[0].last_queued_at).getTime()<config.repeatDelayHours*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Follow-up limit or cooldown reached'})}
  const key='followup:'+q.id+':'+(n+1);
  await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,followup_number:n+1});
  await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)

@@ -15,6 +15,59 @@ function check(name,label){return `<label class="check"><input type="checkbox" n
 function choices(name,label,options){return `<fieldset><legend>${label}</legend><div class="choice-row">${options.map(([v,t,d])=>`<label class="choice"><input type="radio" name="${name}" value="${v}" ${get(name)===v?'checked':''}><span>${t}${d?`<small>${d}</small>`:''}</span></label>`).join('')}</div></fieldset>`;}
 function toast(s){$('#toast').textContent=s;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,3500);}
 function capture(){for(const e of $('#formStep').querySelectorAll('[name]')){if(e.type==='radio'&&!e.checked)continue;if(e.type==='file')continue;if(e.name.startsWith('stop-')){job.stops[Number(e.name.slice(5))]=e.value;continue;}put(e.name,e.type==='checkbox'?e.checked:e.value);}}
+
+let placesLibraryPromise;
+function loadPlacesLibrary(){
+ if(!placesLibraryPromise)placesLibraryPromise=(async()=>{
+  const response=await fetch('/api/public/maps-config');
+  if(!response.ok)throw Error('Maps configuration unavailable');
+  const {apiKey}=await response.json();
+  if(!apiKey)throw Error('Maps key not configured');
+  if(!window.google?.maps?.importLibrary)await new Promise((resolve,reject)=>{
+   const script=document.createElement('script');
+   window.valetMapsReady=resolve;
+   script.src='https://maps.googleapis.com/maps/api/js?key='+encodeURIComponent(apiKey)+'&v=weekly&loading=async&callback=valetMapsReady';
+   script.async=true;script.onerror=reject;document.head.appendChild(script);
+  });
+  return google.maps.importLibrary('places');
+ })().catch(error=>{console.warn('Address autocomplete unavailable',error);return null});
+ return placesLibraryPromise;
+}
+async function attachAddressAutocomplete(){
+ const inputs=[...document.querySelectorAll('#formStep input[name="from"],#formStep input[name="to"],#formStep input[name^="stop-"]')];
+ if(!inputs.length)return;
+ const library=await loadPlacesLibrary();
+ if(!library?.PlaceAutocompleteElement)return;
+ for(const field of inputs){
+  if(!field.isConnected||field.dataset.placesAttached)continue;
+  try{
+   const host=document.createElement('div');host.style.cssText='display:grid;gap:6px;min-width:0;width:100%';
+   const widget=new library.PlaceAutocompleteElement({includedRegionCodes:['ie']});
+   widget.setAttribute('placeholder',field.placeholder||'Search address or Eircode');
+   widget.setAttribute('aria-label',field.getAttribute('aria-label')||field.placeholder||'Search address');
+   widget.style.cssText='display:block;width:100%;color-scheme:light';
+   const toggle=document.createElement('button');toggle.type='button';toggle.className='textbutton';toggle.style.cssText='font-size:12px;justify-self:start;margin:0';
+   field.before(host);host.append(widget,toggle,field);
+   field.hidden=!field.value;
+   widget.hidden=!!field.value;
+   function sync(){field.style.display=field.hidden?'none':'';widget.style.display=widget.hidden?'none':'block';toggle.textContent=field.hidden?'Enter address manually':'Search Google addresses';}
+   sync();
+   toggle.onclick=()=>{field.hidden=!field.hidden;widget.hidden=!field.hidden;sync();if(!field.hidden)field.focus();};
+   widget.addEventListener('gmp-select',async event=>{
+    try{
+     const place=event.placePrediction.toPlace();
+     await place.fetchFields({fields:['formattedAddress']});
+     if(!field.isConnected)return;
+     field.value=place.formattedAddress||event.placePrediction.text.toString();
+     field.hidden=false;widget.hidden=true;sync();capture();
+    }catch(error){field.hidden=false;widget.hidden=true;sync();field.focus();console.warn('Address selection unavailable',error);}
+   });
+   widget.addEventListener('gmp-error',()=>{field.hidden=false;widget.hidden=true;sync();toggle.hidden=true;});
+   field.dataset.placesAttached='1';
+  }catch(error){console.warn('Address autocomplete unavailable',error);}
+ }
+}
+
 function renderStep(){
  $('#formError').hidden=true;
  document.querySelectorAll('.stepper li').forEach((li,i)=>{li.classList.toggle('active',i===step);li.classList.toggle('done',i<step);if(i===step)li.setAttribute('aria-current','step');else li.removeAttribute('aria-current');});
@@ -22,6 +75,7 @@ function renderStep(){
  if(step===0)$('#formStep').innerHTML=`<div class="route-fields">${input('from','Collection address or Eircode','text','e.g. Sandyford, Dublin 18','autocomplete="off" maxlength="180"')}${input('to','Delivery address or Eircode','text','e.g. Bray, Co. Wicklow','autocomplete="off" maxlength="180"')}</div><div id="extraStops">${job.stops.map((s,i)=>`<div class="stop-row"><input aria-label="Extra stop ${i+1}" name="stop-${i}" value="${esc(s)}" placeholder="Extra stop address or Eircode" maxlength="180"><button type="button" class="textbutton" data-remove-stop="${i}">Remove</button></div>`).join('')}</div><button type="button" class="textbutton" id="addStop">+ Add another stop</button><div class="two-col">${input('date','Preferred moving date','date','','min="'+new Date().toLocaleDateString('en-CA',{timeZone:'Europe/Dublin'})+'"')}${select('timing','Timing',[['standard','Standard daytime'],['urgent','Urgent / out of hours']])}</div>${check('flexible','My date is flexible — a suitable route slot could cost less.')}<p class="soft-note">An area or Eircode is enough to get started. We’ll confirm the exact addresses and route before quoting.</p>`;
  if(step===1)$('#formStep').innerHTML=`<label class="field"><span class="field-label">What are we moving?</span><textarea name="description" maxlength="2500" rows="3" placeholder="e.g. One 3-seater sofa, a dismantled double bed and 8 packed boxes. Add dimensions or weight if known.">${esc(job.description)}</textarea><small>A short description is perfect. No item-by-item inventory required.</small></label>${select('load','Roughly how much is there?',Object.entries(labels.load))}${select('itemKind','What best describes the items?',Object.entries(labels.itemKind))}${select('assembly','Will anything need dismantling or reassembly?',[['no','No — everything will be ready'],['yes','Yes — please include this'],['unknown','Not sure yet']])}<label class="upload">Add a few photos <span class="muted">(optional)</span><input id="photoInput" type="file" accept="image/jpeg,image/png,image/webp" multiple><span class="helper">Up to 5 JPG, PNG or WebP photos, 2 MB each (maximum 6 MB combined). Photos will be included with your enquiry.</span></label><div id="photos" class="photos"></div>${input('listing','Or paste an item listing link (optional)','url','https://…','maxlength="2000"')}<p class="helper">For bulky or unusual items, photos and dimensions help us confirm a suitable crew.</p>`;
  if(step===2)$('#formStep').innerHTML=`<p class="helper">Choose the help you need at <strong>both</strong> addresses. Select “Not sure” whenever you need us to check.</p>${accessCard('pickup','Collection',job.from)}${accessCard('dropoff','Delivery',job.to)}<div class="subhead">Where should we send your quote?</div>${input('name','Your name','text','Full name','autocomplete="name" maxlength="100"')}<div class="two-col">${input('phone','Phone number','tel','Your number','autocomplete="tel" maxlength="40"')}${input('email','Email address (required)','email','you@example.com','autocomplete="email" maxlength="180"')}</div>${check('whatsapp','I am happy to be contacted about my enquiry by WhatsApp.')}<p class="helper">We will review your enquiry and contact you directly.</p><label class="field"><span class="field-label">Anything else we should know? <span class="muted">(optional)</span></span><textarea name="notes" rows="2" maxlength="2000" placeholder="Collection times, access arrangements or anything that might help…">${esc(job.notes)}</textarea></label>${check('acknowledge','I’ve checked both addresses as best I can. I understand the price and job details will be confirmed before booking.')}<p class="soft-note">Submitting sends your details to our team. No booking is made until confirmed.</p>`;
+ if(step===0)void attachAddressAutocomplete();
  if(step===1)renderPhotos();
  $('#formStep').querySelectorAll('[name]').forEach(el=>{el.addEventListener('input',capture);el.addEventListener('change',()=>{capture();if(el.name.endsWith('.service')||el.name.endsWith('.floor'))renderStep();});});
  $('#addStop')?.addEventListener('click',()=>{capture();if(job.stops.length>=3)return toast('For more than 3 extra stops, add the details in your notes.');job.stops.push('');renderStep();});

@@ -22,7 +22,10 @@ const ensureOutbox=()=>pool.query(`CREATE TABLE IF NOT EXISTS delivery_outbox (
  attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  locked_until TIMESTAMPTZ, delivered_at TIMESTAMPTZ, last_error TEXT,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
+const formatIrishDate=x=>{if(!x)return '';const d=new Date(x);if(!Number.isFinite(d.getTime()))return '';return new Intl.DateTimeFormat('en-IE',{timeZone:'Europe/Dublin',day:'2-digit',month:'short',year:'numeric',...(/^\d{4}-\d{2}-\d{2}$/.test(String(x))?{}:{hour:'2-digit',minute:'2-digit',hourCycle:'h23'})}).format(d)};
 async function enqueueDelivery(client,key,channel,payload){
+ const eventAt=payload.event_at||new Date().toISOString();
+ payload={...payload,event_at:eventAt,event_datetime:formatIrishDate(eventAt),timezone:'Europe/Dublin',requested_date_display:formatIrishDate(payload.requested_date)||'Flexible / not specified',requested_time:payload.requested_time||'Time to be confirmed',valid_until_display:formatIrishDate(payload.valid_until||payload.quote?.validUntil),collection_date_display:formatIrishDate(payload.collection_date),collection_time:payload.arrival_window||'Time to be confirmed'};
  await client.query("INSERT INTO delivery_outbox(event_key,channel,payload) VALUES($1,$2,$3) ON CONFLICT(event_key) DO NOTHING",[key,channel,JSON.stringify({...payload,event_id:key})]);
 }
 let delivering=false;
@@ -58,9 +61,9 @@ async function notifyMake(payload){
  void processDeliveries();
 }
 async function enquiryNoticeData(enquiryId,quoteId){
- const {rows}=await pool.query('SELECT e.reference,e.job,q.revision,q.quote FROM enquiries e JOIN quotes q ON q.enquiry_id=e.id WHERE e.id=$1 AND q.id=$2',[enquiryId,quoteId]);
+ const {rows}=await pool.query('SELECT e.reference,e.job,q.revision,q.quote,q.sent_at,q.accepted_at FROM enquiries e JOIN quotes q ON q.enquiry_id=e.id WHERE e.id=$1 AND q.id=$2',[enquiryId,quoteId]);
  const x=rows[0];if(!x)throw Error('Notification quote missing');
- return {reference:x.reference,quote_id:quoteId,revision:x.revision,customer_name:x.job.name,customer_email:x.job.email,customer_phone:x.job.phone||'',from:x.job.from,to:x.job.to,quote_total:x.quote.total,agreed_scope:x.quote.scope||''}
+ return {reference:x.reference,quote_id:quoteId,revision:x.revision,customer_name:x.job.name,customer_email:x.job.email,customer_phone:x.job.phone||'',from:x.job.from,to:x.job.to,quote_total:x.quote.total,agreed_scope:x.quote.scope||'',requested_date:x.job.date||null,requested_time:x.job.time||null,valid_until:x.quote.validUntil||null,quote_sent_at:x.sent_at,quote_accepted_at:x.accepted_at}
 }
 
 const token=()=>crypto.randomBytes(32).toString('base64url');
@@ -211,7 +214,7 @@ async function queueAutomaticFollowups(){
  const key='followup:'+q.id+':'+(count+1);
  const t=token(),hash=sha(t);
  await c.query(`UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',coalesce(quote->'whatsappTokenHashes','[]'::jsonb)||to_jsonb($2::text),true) WHERE id=$1`,[q.id,hash]);
- await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,quote_url:quoteUrl(t),followup_number:count+1});
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.time||null,quote_sent_at:q.sent_at,quote_url:quoteUrl(t),followup_number:count+1});
  await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
  ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
  await c.query('COMMIT');
@@ -243,7 +246,7 @@ app.post('/api/admin/followups/:id/queue',auth,wrap(async(req,res)=>{
  const n=last.rows[0]?.queued_count||0;
  if(n>=config.maxReminders||last.rows[0]?.last_queued_at&&Date.now()-new Date(last.rows[0].last_queued_at).getTime()<config.repeatDelayHours*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Follow-up limit or cooldown reached'})}
  const key='followup:'+q.id+':'+(n+1);
- await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,followup_number:n+1});
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.time||null,quote_sent_at:q.sent_at,followup_number:n+1});
  await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
  ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
  await c.query('COMMIT');res.json({ok:true,event_key:key});void processDeliveries();
@@ -387,7 +390,7 @@ app.get('/api/test/enquiries',testApi,testAuth,wrap(async(req,res)=>{
  res.json(rows);
 }));
 const customerQuote=wrap(async(req,res,next)=>{const t=String(req.params.token||'');if(!/^[A-Za-z0-9_-]{40,100}$/.test(t))return res.status(404).json({error:'Quote not found'});const {rows}=await pool.query("SELECT q.id,q.enquiry_id,q.revision,q.quote,q.state,q.viewed_at,e.reference,e.job,e.status FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE (q.customer_token_hash=$1 OR COALESCE(q.quote->'whatsappTokenHashes','[]'::jsonb) ? $1) AND q.state IN ('sent','accepted')",[sha(t)]);if(!rows[0])return res.status(404).json({error:'Quote not found'});req.customerQuote=rows[0];next()});
-app.get('/api/quotes/:token',customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(!q.viewed_at)await pool.query("UPDATE quotes SET viewed_at=now() WHERE id=$1 AND viewed_at IS NULL",[q.id]);const m=await pool.query("SELECT sender,kind,body,created_at FROM messages WHERE quote_id=$1 ORDER BY created_at",[q.id]);res.json({reference:q.reference,job:{name:q.job.name,from:q.job.from,to:q.job.to,date:q.job.date},revision:q.revision,quote:((({whatsappTokenHashes,...safe})=>safe)(q.quote)),state:q.state,status:q.status,messages:m.rows})}));
+app.get('/api/quotes/:token',customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(!q.viewed_at)await pool.query("UPDATE quotes SET viewed_at=now() WHERE id=$1 AND viewed_at IS NULL",[q.id]);const m=await pool.query("SELECT sender,kind,body,created_at FROM messages WHERE quote_id=$1 ORDER BY created_at",[q.id]);const booking=await pool.query('SELECT collection_date,arrival_window FROM bookings WHERE enquiry_id=$1 AND quote_id=$2',[q.enquiry_id,q.id]);res.json({reference:q.reference,job:{name:q.job.name,from:q.job.from,to:q.job.to,date:q.job.date},booking:booking.rows[0]||null,sent_at:q.sent_at,accepted_at:q.accepted_at,revision:q.revision,quote:((({whatsappTokenHashes,...safe})=>safe)(q.quote)),state:q.state,status:q.status,messages:m.rows})}));
 app.post('/api/quotes/:token/accept',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote;if(q.state==='accepted')return res.json({ok:true,status:'accepted'});if(q.status!=='quote_sent')return res.status(409).json({error:'This quotation is being revised or is no longer available for acceptance'});if(q.quote.validUntil&&Date.parse(q.quote.validUntil+'T23:59:59Z')<Date.now())return res.status(409).json({error:'This quote has expired'});const c=await pool.connect();try{await c.query('BEGIN');const updated=await c.query("UPDATE quotes SET state='accepted',accepted_at=now() WHERE id=$1 AND state='sent' RETURNING id",[q.id]);if(!updated.rowCount){await c.query('ROLLBACK');return res.status(409).json({error:'Quote no longer available'})}await c.query("UPDATE enquiries SET status='accepted',updated_at=now() WHERE id=$1",[q.enquiry_id]);await c.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','acceptance','Customer accepted quotation')",[q.enquiry_id,q.id]);await c.query('COMMIT');res.json({ok:true,status:'accepted'});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'quote_accepted',event_id:'accepted:'+q.id,...details,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Acceptance notification preparation failed',error)}}catch(e){await c.query('ROLLBACK');throw e}finally{c.release()}}));
 app.post('/api/quotes/:token/change',rateLimit({windowMs:15*60*1000,limit:12}),customerQuote,wrap(async(req,res)=>{const q=req.customerQuote,body=String(req.body?.message||'').trim();if(body.length<5||body.length>2000)return res.status(400).json({error:'Enter a change request (5–2000 characters)'});if(q.state!=='sent'||q.status!=='quote_sent')return res.status(409).json({error:'Quote is not awaiting review'});await pool.query("INSERT INTO messages(enquiry_id,quote_id,sender,kind,body) VALUES($1,$2,'customer','change_request',$3)",[q.enquiry_id,q.id,body]);await pool.query("UPDATE enquiries SET status='change_requested',updated_at=now() WHERE id=$1",[q.enquiry_id]);res.json({ok:true});try{const details=await enquiryNoticeData(q.enquiry_id,q.id);await notifyMake({event_type:'change_requested',event_id:'change:'+q.id+':'+sha(body),...details,change_message:body,admin_url:(process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com')+'/admin'})}catch(error){console.error('Change notification preparation failed',error)}}));
 app.post('/api/admin/quotes/:id/send',auth,wrap(async(req,res)=>{
@@ -400,7 +403,7 @@ app.post('/api/admin/quotes/:id/send',auth,wrap(async(req,res)=>{
   const row=rows[0];if(!row){await c.query('ROLLBACK');return res.status(404).json({error:'Quote not found'})}
   if(row.state!=='draft'){await c.query('ROLLBACK');return res.status(409).json({error:'Quotation already submitted for delivery'})}
   const t=token(),url=quoteUrl(t);
-  const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url};
+  const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url,requested_date:row.job.date||null,requested_time:row.job.time||null,valid_until:row.quote.validUntil||null};
   await c.query("UPDATE quotes SET state='sent',sent_at=now(),customer_token_hash=$1 WHERE id=$2",[sha(t),row.id]);
   await c.query("UPDATE quotes SET state='superseded' WHERE enquiry_id=$1 AND id<>$2 AND state='sent'",[row.enquiry_id,row.id]);
   await c.query("UPDATE enquiries SET status='quote_sent',updated_at=now() WHERE id=$1",[row.enquiry_id]);

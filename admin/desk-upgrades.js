@@ -1,9 +1,9 @@
-const displayDateTime=x=>{if(!x)return '—';const v=String(x),only=/^\d{4}-\d{2}-\d{2}$/.test(v),d=new Date(x);if(!Number.isFinite(d.getTime()))return v;return new Intl.DateTimeFormat('en-IE',{timeZone:'Europe/Dublin',day:'2-digit',month:'short',year:'numeric',...(only?{}:{hour:'2-digit',minute:'2-digit',hourCycle:'h23'})}).format(d)};
+const deskDisplayDateTime=x=>{if(!x)return '—';const v=String(x),only=/^\d{4}-\d{2}-\d{2}$/.test(v),d=new Date(x);if(!Number.isFinite(d.getTime()))return v;return new Intl.DateTimeFormat('en-IE',{timeZone:'Europe/Dublin',day:'2-digit',month:'short',year:'numeric',...(only?{}:{hour:'2-digit',minute:'2-digit',hourCycle:'h23'})}).format(d)};
 const $=s=>document.querySelector(s),esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stages=[['needs_review','Needs review'],['change_requested','Changes requested'],['draft_ready','Draft ready'],['quote_sent','Quote sent'],['accepted','Accepted'],['booked','Booked']];
 let jobs=[],view='pipeline',loaded=false;
 async function api(url){const r=await fetch(url,{credentials:'same-origin'});if(!r.ok)throw Error('Could not load '+url);return r.json()}
-function date(x){return displayDateTime(x)}
+function date(x){return deskDisplayDateTime(x)}
 function money(x){return new Intl.NumberFormat('en-IE',{style:'currency',currency:'EUR'}).format(Number(x)||0)}
 function card(j){return '<button type="button" class="desk-job" data-open="'+j.id+'"><strong>'+esc(j.name||'Customer')+'</strong><small>'+esc(j.reference)+'</small><span>'+esc(j.email||'')+'</span></button>'}
 function openJob(id){view='pipeline';showView();const button=document.querySelector('#queueList [data-id="'+id+'"]');if(button){button.click();document.querySelector('#quoteDetail')?.scrollIntoView({behavior:'smooth',block:'start'})}}

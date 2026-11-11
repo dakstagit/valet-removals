@@ -73,6 +73,7 @@ const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
 const auth=wrap(async(req,res,next)=>{const t=parseCookies(req)[cookieName];if(!t)return res.status(401).json({error:'Authentication required'});const {rows}=await pool.query('SELECT a.id,a.username FROM sessions s JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=$1 AND s.expires_at>now()',[sha(t)]);if(!rows[0])return res.status(401).json({error:'Session expired'});req.admin=rows[0];next();});
 const sameOrigin=(req,res,next)=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)){const origin=req.headers.origin;if(origin&&origin!==`https://${req.get('host')}`&&origin!==`http://${req.get('host')}`&&origin!==process.env.PUBLIC_ORIGIN)return res.status(403).json({error:'Origin not allowed'});}next();};
 app.use('/api',sameOrigin);
+app.get('/api/public/maps-config',(req,res)=>res.set('Cache-Control','no-store').json({apiKey:process.env.GOOGLE_MAPS_API_KEY||''}));
 app.get('/api/health',wrap(async(req,res)=>{await pool.query('SELECT 1');res.json({ok:true});}));
 app.post('/api/admin/login',rateLimit({windowMs:15*60*1000,limit:10,standardHeaders:'draft-7',legacyHeaders:false}),wrap(async(req,res)=>{
  const username=String(req.body?.username||'').trim(),password=String(req.body?.password||'');

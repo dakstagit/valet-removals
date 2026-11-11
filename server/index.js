@@ -356,7 +356,7 @@ app.post('/api/test/enquiries/quote-sent',testApi,testAuth,wrap(async(req,res)=>
  const from=String(input.from||'Dublin 2').trim(),to=String(input.to||'Dublin 4').trim(),scope=String(input.scope||'Test removal of household furniture').trim();
  const total=Number(input.total??369);
  if(name.length<2||name.length>150||!email.includes('@')||email.length>254||phone.length>40||from.length<3||from.length>300||to.length<3||to.length>300||scope.length<3||scope.length>3000||!Number.isFinite(total)||total<=0||total>100000)return res.status(400).json({error:'Invalid test enquiry fields'});
- const job={name,email,phone,from,to,description:scope,acknowledge:true};
+ const job={name,email,phone,from,to,description:scope,date:String(input.date||new Date(Date.now()+7*86400000).toISOString().slice(0,10)),timing:String(input.timing||'standard').slice(0,100),flexible:false,acknowledge:true};
  const expiry=new Date(Date.now()+14*86400000).toISOString().slice(0,10);
  const quote={total,scope,validUntil:expiry,revision:1,manualRevision:true,preparedAt:new Date().toISOString(),test:true};
  const t=token(),c=await pool.connect();
@@ -377,7 +377,7 @@ app.get('/api/test/deliveries',testApi,testAuth,wrap(async(req,res)=>{
 app.post('/api/test/enquiries/draft',testApi,testAuth,wrap(async(req,res)=>{
  const input=req.body||{},email=String(input.email||'test@example.com').trim();
  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254)return res.status(400).json({error:'Invalid email'});
- const job={name:String(input.name||'Test Draft Customer').slice(0,150),email,phone:'0871234567',from:'Dublin 2',to:'Dublin 4',acknowledge:true};
+ const job={name:String(input.name||'Test Draft Customer').slice(0,150),email,phone:'0871234567',from:'Dublin 2',to:'Dublin 4',date:String(input.date||new Date(Date.now()+7*86400000).toISOString().slice(0,10)),timing:String(input.timing||'standard').slice(0,100),flexible:false,acknowledge:true};
  const quote={total:369,scope:'Test furniture removal',validUntil:new Date(Date.now()+14*86400000).toISOString().slice(0,10),revision:1,test:true};
  const c=await pool.connect();try{
  await c.query('BEGIN');

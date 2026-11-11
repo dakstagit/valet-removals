@@ -5,3 +5,20 @@
 .enquiry-only .modelbar,.enquiry-only .hero-copy,.enquiry-only header nav,.enquiry-only header .nav>.button,.enquiry-only #services,.enquiry-only #how-it-works,.enquiry-only #questions,.enquiry-only footer,.enquiry-only #ownerView,.enquiry-only #deliveryView{display:none!important}
 .enquiry-only header .nav{justify-content:center;padding-top:20px;padding-bottom:20px}.enquiry-only .hero{padding:0 0 42px;min-height:calc(100svh - 90px);background:linear-gradient(145deg,#0b1528,#112a3a)}.enquiry-only .hero-grid{display:block;max-width:740px;padding:30px 20px 0}.enquiry-only .quote-card{width:100%;max-width:680px;margin:0 auto}.enquiry-only #customerView[hidden]{display:none!important}
 @media(max-width:600px){.enquiry-only .hero-grid{padding:18px 12px 0}.enquiry-only header .nav{padding-top:15px;padding-bottom:15px}}
+/* Keep Google Places custom elements within the available form column. */
+#quoteForm,#formStep,#quoteForm .field,#quoteForm .route-fields,#quoteForm .stop-row{min-width:0;max-width:100%}
+#formStep gmp-place-autocomplete{display:block;box-sizing:border-box;width:100%!important;min-width:0!important;max-width:100%!important}
+#formStep gmp-place-autocomplete::part(input){min-width:0;max-width:100%;box-sizing:border-box}
+#formStep .stop-row>div{flex:1 1 0;min-width:0}
+#formStep .two-col{grid-template-columns:repeat(2,minmax(0,1fr))}
+#formStep input:not([type=checkbox]):not([type=radio]),#formStep select,#formStep textarea{min-width:0;max-width:100%}
+@media(max-width:760px){
+ .hero-grid{grid-template-columns:minmax(0,1fr)}
+ .quote-card,#wizard{min-width:0;max-width:100%}
+ #formStep .route-fields label>div{grid-template-columns:minmax(0,1fr)}
+ #formStep .stop-row>div{grid-template-columns:minmax(0,1fr)}
+ #formStep gmp-place-autocomplete{contain:inline-size}
+}
+@media(max-width:420px){
+ #formStep .two-col{grid-template-columns:minmax(0,1fr)}
+}

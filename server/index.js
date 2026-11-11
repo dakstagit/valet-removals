@@ -291,6 +291,24 @@ app.post('/api/enquiries',rateLimit({windowMs:15*60*1000,limit:20}),wrap(async(r
  res.status(201).json(rows[0]);
  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
 }));
+
+app.get('/api/admin/depot',auth,wrap(async(req,res)=>{const {rows}=await pool.query("SELECT value FROM settings WHERE key='depot'");res.json({address:rows[0]?.value?.address||''});}));
+app.put('/api/admin/depot',auth,wrap(async(req,res)=>{const address=String(req.body?.address||'').trim();if(address.length<3||address.length>300)return res.status(400).json({error:'Enter a valid depot address'});await pool.query("INSERT INTO settings(key,value) VALUES('depot',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[JSON.stringify({address})]);res.json({address});}));
+app.post('/api/admin/enquiries/:id/route',auth,wrap(async(req,res)=>{
+ const depot=String(req.body?.depot||'').trim(),key=process.env.GOOGLE_ROUTES_API_KEY;
+ if(!key)return res.status(503).json({error:'Routes API key not configured'});
+ if(!validId(req.params.id)||depot.length<3||depot.length>300)return res.status(400).json({error:'Enter a valid depot address'});
+ const {rows}=await pool.query('SELECT job FROM enquiries WHERE id=$1',[req.params.id]);if(!rows[0])return res.status(404).json({error:'Enquiry not found'});
+ const j=rows[0].job,stops=Array.isArray(j.stops)?j.stops.filter(x=>typeof x==='string'&&x.trim()).slice(0,3):[];
+ const waypoint=address=>({address});
+ async function route(from,to,via=[]){
+  const response=await fetch('https://routes.googleapis.com/directions/v2:computeRoutes',{method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':key,'X-Goog-FieldMask':'routes.distanceMeters,routes.duration'},body:JSON.stringify({origin:waypoint(from),destination:waypoint(to),intermediates:via.map(waypoint),travelMode:'DRIVE',routingPreference:'TRAFFIC_UNAWARE',regionCode:'IE'}),signal:AbortSignal.timeout(15000)});
+  const data=await response.json();const r=data.routes?.[0];if(!response.ok||!r||!Number.isFinite(r.distanceMeters)||!Number.isFinite(parseFloat(r.duration)))throw Error('Google could not calculate a route. Check the addresses and Routes API configuration.');
+  return {minutes:Math.ceil(parseFloat(r.duration)/60),km:r.distanceMeters/1000};
+ }
+ try{const [dispatch,travel,returnTrip]=await Promise.all([route(depot,j.from),route(j.from,j.to,stops),route(j.to,depot)]);res.json({dispatch,travel,returnTrip,totalKm:dispatch.km+travel.km+returnTrip.km});}catch(e){res.status(502).json({error:e.message});}
+}));
+
 app.get('/api/admin/settings',auth,wrap(async(req,res)=>{const {rows}=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json(rows[0]?.value||DEFAULTS);}));
 app.put('/api/admin/settings',auth,wrap(async(req,res)=>{const s=req.body;const out={};for(const [key,value] of Object.entries(DEFAULTS)){const v=Number(s?.[key]);if(!Number.isFinite(v)||v<0||v>100000)return res.status(400).json({error:'Invalid rate: '+key});out[key]=v;}await pool.query("INSERT INTO settings(key,value) VALUES('rates',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[JSON.stringify(out)]);res.json(out);}));
 app.post('/api/admin/enquiries/:id/calculate',auth,wrap(async(req,res)=>{const {rows}=await pool.query('SELECT job FROM enquiries WHERE id=$1',[req.params.id]);if(!rows[0])return res.status(404).json({error:'Not found'});const settings=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json(calculate(rows[0].job,settings.rows[0]?.value||DEFAULTS,req.body?.overrides||{}));}));

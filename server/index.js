@@ -63,7 +63,7 @@ async function notifyMake(payload){
 async function enquiryNoticeData(enquiryId,quoteId){
  const {rows}=await pool.query('SELECT e.reference,e.job,q.revision,q.quote,q.sent_at,q.accepted_at FROM enquiries e JOIN quotes q ON q.enquiry_id=e.id WHERE e.id=$1 AND q.id=$2',[enquiryId,quoteId]);
  const x=rows[0];if(!x)throw Error('Notification quote missing');
- return {reference:x.reference,quote_id:quoteId,revision:x.revision,customer_name:x.job.name,customer_email:x.job.email,customer_phone:x.job.phone||'',from:x.job.from,to:x.job.to,quote_total:x.quote.total,agreed_scope:x.quote.scope||'',requested_date:x.job.date||null,requested_time:x.job.time||null,valid_until:x.quote.validUntil||null,quote_sent_at:x.sent_at,quote_accepted_at:x.accepted_at}
+ return {reference:x.reference,quote_id:quoteId,revision:x.revision,customer_name:x.job.name,customer_email:x.job.email,customer_phone:x.job.phone||'',from:x.job.from,to:x.job.to,quote_total:x.quote.total,agreed_scope:x.quote.scope||'',requested_date:x.job.date||null,requested_time:x.job.timing||x.job.time||null,valid_until:x.quote.validUntil||null,quote_sent_at:x.sent_at,quote_accepted_at:x.accepted_at}
 }
 
 const token=()=>crypto.randomBytes(32).toString('base64url');
@@ -205,7 +205,7 @@ async function queueAutomaticFollowups(){
  const c=await pool.connect();
  try{
  await c.query('BEGIN');
- const {rows:locked}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,e.status,e.reference,e.job
+ const {rows:locked}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,q.quote,e.status,e.reference,e.job
  FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='sent' FOR UPDATE OF q`,[item.id]);
  const q=locked[0];if(!q||q.status!=='quote_sent'){await c.query('ROLLBACK');continue}
  const {rows:previous}=await c.query('SELECT queued_count,last_queued_at FROM quote_followups WHERE quote_id=$1 FOR UPDATE',[q.id]);
@@ -214,7 +214,7 @@ async function queueAutomaticFollowups(){
  const key='followup:'+q.id+':'+(count+1);
  const t=token(),hash=sha(t);
  await c.query(`UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',coalesce(quote->'whatsappTokenHashes','[]'::jsonb)||to_jsonb($2::text),true) WHERE id=$1`,[q.id,hash]);
- await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.time||null,quote_sent_at:q.sent_at,quote_url:quoteUrl(t),followup_number:count+1});
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.timing||q.job.time||null,quote_sent_at:q.sent_at,valid_until:q.quote?.validUntil||null,quote_url:quoteUrl(t),followup_number:count+1});
  await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
  ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
  await c.query('COMMIT');
@@ -239,14 +239,16 @@ app.post('/api/admin/followups/:id/queue',auth,wrap(async(req,res)=>{
  await ensureOperationsTables();await ensureOutbox();
  const c=await pool.connect();try{
  await c.query('BEGIN');
- const {rows}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,q.viewed_at,e.status,e.reference,e.job
+ const {rows}=await c.query(`SELECT q.id,q.enquiry_id,q.sent_at,q.viewed_at,q.quote,e.status,e.reference,e.job
  FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id WHERE q.id=$1 AND q.state='sent' FOR UPDATE OF q`,[req.params.id]);
  const q=rows[0];if(!q||q.status!=='quote_sent'||!q.sent_at||Date.now()-new Date(q.sent_at).getTime()<config.firstDelayHours*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Not eligible for follow-up'})}
  const last=await c.query('SELECT last_queued_at,queued_count FROM quote_followups WHERE quote_id=$1',[q.id]);
  const n=last.rows[0]?.queued_count||0;
  if(n>=config.maxReminders||last.rows[0]?.last_queued_at&&Date.now()-new Date(last.rows[0].last_queued_at).getTime()<config.repeatDelayHours*3600000){await c.query('ROLLBACK');return res.status(409).json({error:'Follow-up limit or cooldown reached'})}
  const key='followup:'+q.id+':'+(n+1);
- await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.time||null,quote_sent_at:q.sent_at,followup_number:n+1});
+ const t=token(),hash=sha(t);
+ await c.query(`UPDATE quotes SET quote=jsonb_set(quote,'{whatsappTokenHashes}',coalesce(quote->'whatsappTokenHashes','[]'::jsonb)||to_jsonb($2::text),true) WHERE id=$1`,[q.id,hash]);
+ await enqueueDelivery(c,key,'notification',{event_type:'quote_followup',reference:q.reference,quote_id:q.id,customer_name:q.job.name,customer_email:q.job.email,requested_date:q.job.date||null,requested_time:q.job.timing||q.job.time||null,quote_sent_at:q.sent_at,valid_until:q.quote?.validUntil||null,quote_url:quoteUrl(t),followup_number:n+1});
  await c.query(`INSERT INTO quote_followups(quote_id,last_queued_at,queued_count) VALUES($1,now(),1)
  ON CONFLICT(quote_id) DO UPDATE SET last_queued_at=now(),queued_count=quote_followups.queued_count+1`,[q.id]);
  await c.query('COMMIT');res.json({ok:true,event_key:key});void processDeliveries();
@@ -403,7 +405,7 @@ app.post('/api/admin/quotes/:id/send',auth,wrap(async(req,res)=>{
   const row=rows[0];if(!row){await c.query('ROLLBACK');return res.status(404).json({error:'Quote not found'})}
   if(row.state!=='draft'){await c.query('ROLLBACK');return res.status(409).json({error:'Quotation already submitted for delivery'})}
   const t=token(),url=quoteUrl(t);
-  const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url,requested_date:row.job.date||null,requested_time:row.job.time||null,valid_until:row.quote.validUntil||null};
+  const payload={type:'valet_quote_approved',reference:row.reference,quote_id:row.id,revision:row.revision,customer_name:row.job.name,customer_email:row.job.email,customer_phone:row.job.phone,from:row.job.from,to:row.job.to,quote:row.quote,quote_url:url,requested_date:row.job.date||null,requested_time:row.job.timing||row.job.time||null,valid_until:row.quote.validUntil||null};
   await c.query("UPDATE quotes SET state='sent',sent_at=now(),customer_token_hash=$1 WHERE id=$2",[sha(t),row.id]);
   await c.query("UPDATE quotes SET state='superseded' WHERE enquiry_id=$1 AND id<>$2 AND state='sent'",[row.enquiry_id,row.id]);
   await c.query("UPDATE enquiries SET status='quote_sent',updated_at=now() WHERE id=$1",[row.enquiry_id]);

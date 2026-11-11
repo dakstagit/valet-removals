@@ -1,3 +1,4 @@
+import QRCode from 'qrcode';
 import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
@@ -11,7 +12,7 @@ import {calculate,DEFAULTS} from './logic.js';
 
 const app=express();app.disable('x-powered-by');
 const projectRoot=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'2mb'}));
+app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'4mb'}));
 const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.DATABASE_SSL==='require'?{rejectUnauthorized:true}:undefined});
 const sha=s=>crypto.createHash('sha256').update(s).digest('hex');
 // One Make scenario can route event_type to Barry or the customer.
@@ -270,6 +271,36 @@ app.get('/api/admin/photos/:id',auth,wrap(async(req,res)=>{
  res.set({'Content-Type':rows[0].mime_type,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'});
  res.send(rows[0].data);
 }));
+
+const ensureMobilePhotos=()=>pool.query("CREATE TABLE IF NOT EXISTS mobile_photo_sessions (id TEXT PRIMARY KEY, upload_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, photos JSONB NOT NULL DEFAULT '[]'::jsonb)");
+const mobileLimit=rateLimit({windowMs:15*60*1000,limit:120});
+app.post('/api/mobile-photos',rateLimit({windowMs:15*60*1000,limit:15}),wrap(async(req,res)=>{
+ await ensureMobilePhotos();await pool.query('DELETE FROM mobile_photo_sessions WHERE expires_at<now()');
+ const id=crypto.randomBytes(24).toString('hex'),upload=crypto.randomBytes(24).toString('hex');
+ await pool.query("INSERT INTO mobile_photo_sessions(id,upload_hash,expires_at) VALUES($1,$2,now()+interval '1 hour')",[id,sha(upload)]);
+ const origin=process.env.PUBLIC_ORIGIN||'https://valet-removals-updated.onrender.com';
+ const url=origin.replace(/\/$/,'')+'/mobile-upload#'+id+'.'+upload;
+ res.set('Cache-Control','no-store').json({id,url,qr:await QRCode.toDataURL(url,{width:220,margin:2})});
+}));
+app.get('/api/mobile-photos/:id',mobileLimit,wrap(async(req,res)=>{
+ await ensureMobilePhotos();const {rows}=await pool.query('SELECT photos FROM mobile_photo_sessions WHERE id=$1 AND expires_at>now()',[req.params.id]);if(!rows[0])return res.status(404).json({error:'Upload session expired'});
+ res.set('Cache-Control','no-store').json({photos:rows[0].photos});
+}));
+app.delete('/api/mobile-photos/:id/:photo',mobileLimit,wrap(async(req,res)=>{
+ await ensureMobilePhotos();await pool.query("UPDATE mobile_photo_sessions SET photos=coalesce((SELECT jsonb_agg(p) FROM jsonb_array_elements(photos) p WHERE p->>'id'<>$2),'[]'::jsonb) WHERE id=$1 AND expires_at>now()",[req.params.id,req.params.photo]);res.json({ok:true});
+}));
+app.post('/api/mobile-photos/:id/upload',mobileLimit,wrap(async(req,res)=>{
+ await ensureMobilePhotos();const p=req.body?.photo,secret=String(req.body?.secret||'');
+ if(!p||p.mime_type!=='image/webp'||typeof p.content_base64!=='string'||p.content_base64.length>600000)return res.status(400).json({error:'Invalid photo'});
+ const data=Buffer.from(p.content_base64,'base64');if(data.length<20||data.length>450000||data.subarray(0,4).toString()!=='RIFF'||data.subarray(8,12).toString()!=='WEBP')return res.status(400).json({error:'Invalid WebP'});
+ const photo={id:crypto.randomBytes(12).toString('hex'),filename:String(p.filename||'photo.webp').slice(0,150),mime_type:'image/webp',content_base64:data.toString('base64')};
+ const r=await pool.query("UPDATE mobile_photo_sessions SET photos=photos||$3::jsonb WHERE id=$1 AND upload_hash=$2 AND expires_at>now() AND jsonb_array_length(photos)<5 RETURNING jsonb_array_length(photos) AS count",[req.params.id,sha(secret),JSON.stringify([photo])]);
+ if(!r.rowCount)return res.status(409).json({error:'Session expired or five photos already uploaded'});res.json({count:r.rows[0].count});
+}));
+app.get('/mobile-upload',(req,res)=>res.set('Cache-Control','no-store').sendFile(path.join(projectRoot,'mobile-upload.html')));
+app.get('/mobile-upload.js',(req,res)=>res.sendFile(path.join(projectRoot,'mobile-upload.js')));
+setInterval(()=>ensureMobilePhotos().then(()=>pool.query('DELETE FROM mobile_photo_sessions WHERE expires_at<now()')).catch(console.error),15*60*1000).unref();
+
 app.post('/api/enquiries',rateLimit({windowMs:15*60*1000,limit:20}),wrap(async(req,res)=>{
  const job=req.body?.job;
  if(!job||typeof job!=='object'||typeof job.from!=='string'||job.from.trim().length<3||typeof job.to!=='string'||job.to.trim().length<3||typeof job.name!=='string'||job.name.trim().length<2||typeof job.email!=='string'||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(job.email)||!job.acknowledge)return res.status(400).json({error:'Incomplete enquiry'});

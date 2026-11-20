@@ -22,3 +22,10 @@
 @media(max-width:420px){
  #formStep .two-col{grid-template-columns:minmax(0,1fr)}
 }
+
+/* Customer-facing premium disclosures */
+.premium-notice{margin:14px 0;padding:15px 16px;border:1px solid #f1b58f;border-left:4px solid #ee6425;background:#fff5ed;border-radius:10px;color:#3b2c23}
+.premium-notice strong{display:block;margin-bottom:6px}
+.premium-notice p{margin:4px 0 10px;line-height:1.5}
+.premium-notice[hidden]{display:none!important}
+.premium-notice .check{margin:8px 0 0}

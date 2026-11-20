@@ -303,7 +303,7 @@ setInterval(()=>ensureMobilePhotos().then(()=>pool.query('DELETE FROM mobile_pho
 
 app.post('/api/enquiries',rateLimit({windowMs:15*60*1000,limit:20}),wrap(async(req,res)=>{
  const job=req.body?.job;
- if(!job||typeof job!=='object'||typeof job.from!=='string'||job.from.trim().length<3||typeof job.to!=='string'||job.to.trim().length<3||typeof job.name!=='string'||job.name.trim().length<2||typeof job.email!=='string'||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(job.email)||!job.acknowledge)return res.status(400).json({error:'Incomplete enquiry'});
+ if(!job||typeof job!=='object'||!['1000-2500','2500-5000','5000plus'].includes(job.goodsValue)||(/^\d{4}-\d{2}-\d{2}$/.test(job.date||'')&&new Date(job.date+'T12:00:00Z').getUTCDay()===0&&job.sundayAccepted!==true)||typeof job.from!=='string'||job.from.trim().length<3||typeof job.to!=='string'||job.to.trim().length<3||typeof job.name!=='string'||job.name.trim().length<2||typeof job.email!=='string'||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(job.email)||!job.acknowledge)return res.status(400).json({error:'Incomplete enquiry'});
  const photos=req.body?.photos||[];
  if(!Array.isArray(photos)||photos.length>5)return res.status(400).json({error:'Maximum five photos'});
  const decoded=[];
@@ -381,7 +381,7 @@ app.post('/api/admin/enquiries/:id/route',auth,wrap(async(req,res)=>{
  try{const [dispatch,travel,returnTrip]=await Promise.all([route(depot,j.from),route(j.from,j.to,stops),route(j.to,depot)]);res.json({dispatch,travel,returnTrip,totalKm:dispatch.km+travel.km+returnTrip.km});}catch(e){res.status(502).json({error:e.message});}
 }));
 
-app.get('/api/admin/settings',auth,wrap(async(req,res)=>{const {rows}=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json(rows[0]?.value||DEFAULTS);}));
+app.get('/api/admin/settings',auth,wrap(async(req,res)=>{const {rows}=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json({...DEFAULTS,...(rows[0]?.value||{})});}));
 app.put('/api/admin/settings',auth,wrap(async(req,res)=>{const s=req.body;const out={};for(const [key,value] of Object.entries(DEFAULTS)){const v=Number(s?.[key]);if(!Number.isFinite(v)||v<0||v>100000)return res.status(400).json({error:'Invalid rate: '+key});out[key]=v;}await pool.query("INSERT INTO settings(key,value) VALUES('rates',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()",[JSON.stringify(out)]);res.json(out);}));
 app.post('/api/admin/enquiries/:id/calculate',auth,wrap(async(req,res)=>{const {rows}=await pool.query('SELECT job FROM enquiries WHERE id=$1',[req.params.id]);if(!rows[0])return res.status(404).json({error:'Not found'});const settings=await pool.query("SELECT value FROM settings WHERE key='rates'");res.json(calculate(rows[0].job,settings.rows[0]?.value||DEFAULTS,req.body?.overrides||{}));}));
 app.post('/api/admin/enquiries/:id/drafts',auth,wrap(async(req,res)=>{

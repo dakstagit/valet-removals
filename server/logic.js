@@ -1,5 +1,5 @@
 // Pricing defaults and time allowances follow Barry's supplied pricing.js.
-export const DEFAULTS=Object.freeze({one:65,two:100,minHours:2,vat:23,small:20,medium:40,large:70,stairs:20,lift:15,carryMid:10,carryLong:20,steps:5,extraStop:20,urgent:15,waitGrace:10});
+export const DEFAULTS=Object.freeze({one:65,two:100,minHours:2,vat:23,small:20,medium:40,large:70,stairs:20,lift:15,carryMid:10,carryLong:20,steps:5,extraStop:20,urgent:15,sunday:15,waitGrace:10});
 export const money=n=>new Intl.NumberFormat('en-IE',{style:'currency',currency:'EUR',maximumFractionDigits:2}).format(n);
 export function calculate(job,settings=DEFAULTS,overrides={}){
  const s={...DEFAULTS,...settings};
@@ -33,8 +33,11 @@ export function calculate(job,settings=DEFAULTS,overrides={}){
  add('Additional handling agreed after review',Number(o.handlingAdjustment));
  const stops=(job.stops||[]).filter(x=>x.trim());if(stops.length){add('Handling at '+stops.length+' extra stop(s)',stops.length*s.extraStop*scale);flags.push('Verify access and driving time for every additional stop.');}
  if(job.timing==='urgent')flags.push('Confirm urgent / out-of-hours availability.');
+ const sunday=/^\d{4}-\d{2}-\d{2}$/.test(job.date||'')&&new Date(job.date+'T12:00:00Z').getUTCDay()===0;
+ if(sunday)flags.push('Sunday booking: confirm premium and availability.');
+ if(job.goodsValue==='5000plus')flags.push('HIGH VALUE GOODS (€5,000+): review insurance cover, declared value and handling before quoting.');
  if(!o.routeVerified)flags.push('Route times are placeholders; verify the complete route before quoting.');
  if(!o.handlingVerified)flags.push('Review item quantities, handling time and vehicle capacity before quoting.');
- const rawMinutes=rows.reduce((a,r)=>a+r.minutes,0),billedMinutes=Math.max(s.minHours*60,Math.ceil(rawMinutes/15)*15),rate=crew===1?s.one:s.two,labour=billedMinutes/60*rate,premium=job.timing==='urgent'?labour*s.urgent/100:0,mileage=Number(o.extraKm)*Number(o.kmRate),extras=Number(o.equipment)+Number(o.expenses)+mileage,net=Math.round((labour+premium+extras)*100)/100,tax=Math.round(net*s.vat)/100;
- return {rows,flags:[...new Set(flags)],crew,rate,rawMinutes,billedMinutes,labour,premium,extras,mileage,net,tax,total:Math.round((net+tax)*100)/100,overrides:o,eligible:!!o.routeVerified&&!!o.handlingVerified&&!!o.feasibility&&!(crew===1&&(job.itemKind!=='light'||load!=='small'))};
+ const rawMinutes=rows.reduce((a,r)=>a+r.minutes,0),billedMinutes=Math.max(s.minHours*60,Math.ceil(rawMinutes/15)*15),rate=crew===1?s.one:s.two,labour=billedMinutes/60*rate,urgentPremium=job.timing==='urgent'?labour*s.urgent/100:0,sundayPremium=sunday?labour*s.sunday/100:0,premium=urgentPremium+sundayPremium,mileage=Number(o.extraKm)*Number(o.kmRate),extras=Number(o.equipment)+Number(o.expenses)+mileage,net=Math.round((labour+premium+extras)*100)/100,tax=Math.round(net*s.vat)/100;
+ return {rows,flags:[...new Set(flags)],crew,rate,rawMinutes,billedMinutes,labour,premium,urgentPremium,sundayPremium,extras,mileage,net,tax,total:Math.round((net+tax)*100)/100,overrides:o,eligible:!!o.routeVerified&&!!o.handlingVerified&&!!o.feasibility&&!(crew===1&&(job.itemKind!=='light'||load!=='small'))};
 }
